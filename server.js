@@ -628,6 +628,8 @@ app.get('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
       emergencyPhone: p.emergencyPhone || '',
       address: p.address || '',
       status: p.status || 'ativo',
+      approvedBy: p.approvedBy ? p.approvedBy.toString() : null,
+      approvedAt: p.approvedAt ? p.approvedAt.toISOString() : null,
       treatmentType: p.treatmentType || 'Massoterapia e Estética Corporal',
       notes: p.notes || '',
       totalSessions: p.totalSessions || 0,
@@ -909,9 +911,41 @@ app.get('/api/patients/pending', authMiddleware, requireDoctor, async (req, res)
   try {
     console.log('📤 Buscando pacientes pendentes...');
     
+    // Busca pacientes com status pendente ou aguardando aprovação
     const pendingPatients = await Patient.find({ 
-      status: 'aguardando_aprovacao' 
+      status: { $in: ['aguardando_aprovacao', 'pending'] } 
     }).sort({ createdAt: -1 });
+    
+    // Busca também usuários com role PATIENT que ainda estão pendentes
+    const pendingUsers = await User.find({
+      role: 'PATIENT',
+      $or: [{ status: 'pending' }, { isApproved: false }]
+    }).select('-password');
+
+    // Mapeia emails já presentes
+    const existingEmails = new Set(pendingPatients.map(p => (p.email || '').toLowerCase().trim()));
+
+    // Adiciona fichas de usuários que ainda não tenham ficha de paciente correspondente
+    for (const u of pendingUsers) {
+      const uEmail = (u.email || '').toLowerCase().trim();
+      if (!existingEmails.has(uEmail)) {
+        let pat = await Patient.findOne({ $or: [{ userId: u._id }, { email: uEmail }] });
+        if (!pat) {
+          pat = await Patient.create({
+            userId: u._id,
+            name: u.name,
+            email: u.email,
+            phone: u.phone,
+            status: 'aguardando_aprovacao',
+            treatmentType: 'Massoterapia e Estética Corporal'
+          });
+        }
+        if (pat && (pat.status === 'aguardando_aprovacao' || pat.status === 'pending')) {
+          pendingPatients.push(pat);
+          existingEmails.add(uEmail);
+        }
+      }
+    }
     
     console.log(`📋 Encontrados ${pendingPatients.length} pacientes pendentes`);
     
@@ -942,11 +976,26 @@ app.get('/api/patients/pending', authMiddleware, requireDoctor, async (req, res)
           } catch (userErr) {
             console.warn(`⚠️ Erro ao buscar usuário:`, userErr.message);
           }
+        } else if (p.email) {
+          try {
+            const user = await User.findOne({ email: p.email.toLowerCase().trim() }).select('-password');
+            if (user) {
+              userData = {
+                id: user._id.toString(),
+                name: user.name || 'Usuário sem nome',
+                email: user.email || '',
+                phone: user.phone || '',
+                status: user.status || 'pending'
+              };
+            }
+          } catch (userErr) {
+            console.warn(`⚠️ Erro ao buscar usuário por email:`, userErr.message);
+          }
         }
         
         return {
           id: p._id.toString(),
-          userId: p.userId ? p.userId.toString() : null,
+          userId: p.userId ? p.userId.toString() : (userData?.id || null),
           name: p.name || 'Nome não informado',
           email: p.email || '',
           phone: p.phone || '',
@@ -1021,19 +1070,32 @@ app.post('/api/patients/approve/:id', authMiddleware, requireDoctor, async (req,
   try {
     const { id } = req.params;
     
-    let patient = await Patient.findById(id);
+    let patient = null;
+    try {
+      patient = await Patient.findById(id);
+    } catch (e) {
+      // id might not be ObjectId
+    }
     if (!patient) {
       patient = await Patient.findOne({ userId: id });
     }
 
     let user = null;
     if (patient?.userId) {
-      user = await User.findById(patient.userId);
-    } else {
-      user = await User.findById(id);
-      if (user && !patient) {
-        patient = await Patient.findOne({ email: user.email });
-      }
+      try {
+        user = await User.findById(patient.userId);
+      } catch (e) {}
+    }
+    if (!user) {
+      try {
+        user = await User.findById(id);
+      } catch (e) {}
+    }
+    if (!user && patient?.email) {
+      user = await User.findOne({ email: patient.email.toLowerCase().trim() });
+    }
+    if (!patient && user) {
+      patient = await Patient.findOne({ $or: [{ userId: user._id }, { email: user.email.toLowerCase().trim() }] });
     }
 
     if (!patient && !user) {
