@@ -43,10 +43,7 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Permite requisições sem origin (como mobile apps, Postman, curl ou server-to-server)
     if (!origin) return callback(null, true);
-
-    // Permite se estiver na lista explícita ou casar com padrões conhecidos
     const isAllowed = allowedOrigins.includes(origin) ||
       origin.endsWith('.github.io') ||
       origin.endsWith('.onrender.com') ||
@@ -54,11 +51,9 @@ app.use(cors({
       origin.endsWith('.netlify.app') ||
       origin.includes('localhost') ||
       origin.includes('127.0.0.1');
-
     if (isAllowed) {
       callback(null, true);
     } else {
-      // Por segurança mas sem quebrar integrações legítimas em dev/preview
       callback(null, true);
     }
   },
@@ -68,14 +63,11 @@ app.use(cors({
   optionsSuccessStatus: 200
 }));
 
-// Suporte a preflight OPTIONS explícito
 app.options('*', cors());
 
-// Limite elevado para suportar anexos de exames médicos (PDFs e imagens em base64)
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Log de requisições para auditoria e debug
 app.use((req, res, next) => {
   if (req.url.startsWith('/api')) {
     console.log(`📡 [${req.method}] ${req.url} - Origin: ${req.headers.origin || 'local'}`);
@@ -87,7 +79,6 @@ app.use((req, res, next) => {
 // MODELOS & SCHEMAS DO MONGODB
 // ==============================================================================
 
-// 1. Schema de Anexo de Exames
 const ExamSchema = new mongoose.Schema({
   title: { type: String, required: true },
   category: { 
@@ -96,7 +87,7 @@ const ExamSchema = new mongoose.Schema({
     default: 'Laudo Médico' 
   },
   date: { type: String, default: () => new Date().toISOString().split('T')[0] },
-  fileUrl: { type: String, required: true }, // base64 DataURL ou link do arquivo
+  fileUrl: { type: String, required: true },
   fileName: { type: String, required: true },
   fileType: { type: String, default: 'application/pdf' },
   fileSize: { type: String, default: '' },
@@ -106,7 +97,6 @@ const ExamSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-// 2. Schema de Usuário (autenticação & perfis)
 const UserSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -121,7 +111,6 @@ const UserSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', UserSchema);
 
-// 3. Schema de Paciente (cadastro clínico & histórico)
 const PatientSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   name: { type: String, required: true, trim: true },
@@ -142,7 +131,7 @@ const PatientSchema = new mongoose.Schema({
   notes: { type: String, default: '' },
   totalSessions: { type: Number, default: 0 },
   lastVisit: { type: String, default: '' },
-  exams: [ExamSchema], // <- Suporte completo a anexos de exames
+  exams: [ExamSchema],
   approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   approvedAt: { type: Date },
   createdAt: { type: Date, default: Date.now },
@@ -150,7 +139,6 @@ const PatientSchema = new mongoose.Schema({
 });
 const Patient = mongoose.model('Patient', PatientSchema);
 
-// 4. Schema de Perguntas da Anamnese (personalizáveis no banco)
 const QuestionSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
   categoryId: { type: String, required: true },
@@ -175,7 +163,6 @@ const QuestionSchema = new mongoose.Schema({
 });
 const Question = mongoose.model('Question', QuestionSchema);
 
-// 5. Schema de Ficha de Anamnese
 const AnamnesisSchema = new mongoose.Schema({
   patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient', required: true },
   doctorName: { type: String, default: 'Dra. Yasmin Oliveira' },
@@ -202,7 +189,6 @@ const AnamnesisSchema = new mongoose.Schema({
 });
 const Anamnesis = mongoose.model('Anamnesis', AnamnesisSchema);
 
-// 6. Schema de Agendamentos
 const AppointmentSchema = new mongoose.Schema({
   patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient', required: true },
   patientName: { type: String, required: true },
@@ -252,12 +238,10 @@ function authMiddleware(req, res, next) {
   if (!authHeader) {
     return res.status(401).json({ error: 'Token não fornecido' });
   }
-
   const token = authHeader.split(' ')[1];
   if (!token) {
     return res.status(401).json({ error: 'Token inválido' });
   }
-
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) {
       return res.status(403).json({ error: 'Token inválido ou expirado' });
@@ -279,7 +263,6 @@ function requireDoctor(req, res, next) {
 // 1. ROTAS DE AUTENTICAÇÃO (/api/auth)
 // ==============================================================================
 
-// REGISTRO DE NOVO USUÁRIO
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, phone, password, role } = req.body;
@@ -297,13 +280,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const assignedRole = role === 'DOCTOR' ? 'DOCTOR' : 'PATIENT';
-
-    // AMARRAÇÃO AUTOMÁTICA POR E-MAIL:
-    // Verifica se a Dra. Yasmin (única administradora) já inseriu um paciente com este exato e-mail
     const existingPatient = await Patient.findOne({ email: cleanEmail });
-
-    // Se o e-mail for IGUAL ao cadastrado pela doutora, é aprovado automaticamente!
-    // Se for DIFERENTE, fica pendente de aprovação da Dra. Yasmin.
     const isAutoApproved = assignedRole === 'DOCTOR' || !!existingPatient;
 
     const newUser = await User.create({
@@ -320,14 +297,12 @@ app.post('/api/auth/register', async (req, res) => {
 
     if (assignedRole === 'PATIENT') {
       if (existingPatient) {
-        // Vincula a ficha existente da Dra. ao novo usuário
         existingPatient.userId = newUser._id;
         existingPatient.status = 'ativo';
         await existingPatient.save();
         patientRecord = existingPatient;
         console.log(`🔗 Paciente existente vinculado e aprovado automaticamente: ${cleanEmail}`);
       } else {
-        // E-mail diferente: Cria paciente com status 'aguardando_aprovacao'
         patientRecord = await Patient.create({
           userId: newUser._id,
           name: newUser.name,
@@ -340,7 +315,6 @@ app.post('/api/auth/register', async (req, res) => {
       }
     }
 
-    // Se aprovado automaticamente, gera token de acesso direto
     if (isAutoApproved) {
       const token = jwt.sign(
         { id: newUser._id.toString(), role: newUser.role, email: newUser.email, status: newUser.status, name: newUser.name },
@@ -369,7 +343,6 @@ app.post('/api/auth/register', async (req, res) => {
       });
     }
 
-    // Se pendente de aprovação (e-mail diferente da base da Dra. Yasmin):
     return res.status(201).json({
       success: true,
       autoApproved: false,
@@ -394,7 +367,6 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// LOGIN COM VALIDAÇÃO RIGOROSA
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -405,7 +377,6 @@ app.post('/api/auth/login', async (req, res) => {
     const cleanEmail = email.toLowerCase().trim();
     const user = await User.findOne({ email: cleanEmail });
     
-    // Se o e-mail não existe no banco de dados, retorna erro claro
     if (!user) {
       return res.status(401).json({ 
         error: 'E-mail não cadastrado. Verifique a digitação ou crie sua conta na opção "Novo Usuário".',
@@ -413,7 +384,6 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    // Se a senha não confere, retorna erro claro
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(401).json({ 
@@ -422,7 +392,6 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    // Bloqueia acesso se o cadastro do paciente ainda estiver pendente de aprovação pela Dra. Yasmin
     if (user.role === 'PATIENT' && (user.status === 'pending' || !user.isApproved)) {
       return res.status(403).json({ 
         error: 'Seu cadastro está pendente de aprovação pela Dra. Yasmin. Aguarde a liberação do seu acesso pela administração da clínica.',
@@ -431,7 +400,6 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    // Bloqueia se foi rejeitado
     if (user.role === 'PATIENT' && user.status === 'rejected') {
       return res.status(403).json({ 
         error: 'Seu cadastro não foi aprovado pela administração da clínica.',
@@ -465,7 +433,6 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// DADOS DO USUÁRIO LOGADO
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select('-password');
@@ -491,10 +458,8 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
 
 // ==============================================================================
 // 2. ROTAS DE USUÁRIOS NO MONGO (/api/users)
-// Pessoas que cadastram novo usuário
 // ==============================================================================
 
-// LISTAR USUÁRIOS
 app.get('/api/users', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { role, status } = req.query;
@@ -522,7 +487,6 @@ app.get('/api/users', authMiddleware, requireDoctor, async (req, res) => {
   }
 });
 
-// CRIAR NOVO USUÁRIO (pela Dra. ou endpoint REST)
 app.post('/api/users', async (req, res) => {
   try {
     const { name, email, phone, password, role } = req.body;
@@ -572,7 +536,6 @@ app.post('/api/users', async (req, res) => {
   }
 });
 
-// BUSCAR USUÁRIO POR ID
 app.get('/api/users/:id', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.params.id).select('-password');
@@ -583,7 +546,6 @@ app.get('/api/users/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// ATUALIZAR USUÁRIO (status, aprovação, dados)
 app.put('/api/users/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { name, phone, role, status, isApproved } = req.body;
@@ -597,7 +559,6 @@ app.put('/api/users/:id', authMiddleware, requireDoctor, async (req, res) => {
     const user = await User.findByIdAndUpdate(req.params.id, updateData, { new: true }).select('-password');
     if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
 
-    // Sincroniza também no paciente se existir
     await Patient.findOneAndUpdate(
       { email: user.email },
       { 
@@ -613,7 +574,6 @@ app.put('/api/users/:id', authMiddleware, requireDoctor, async (req, res) => {
   }
 });
 
-// DELETAR USUÁRIO
 app.delete('/api/users/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const user = await User.findByIdAndDelete(req.params.id);
@@ -625,19 +585,20 @@ app.delete('/api/users/:id', authMiddleware, requireDoctor, async (req, res) => 
 });
 
 // ==============================================================================
-// 3. ROTAS DE PACIENTES NO MONGO (/api/patients)
-// Pacientes cadastrados pela Dra. Yasmin, com fichas, exames e amarração
+// 3. ROTAS DE PACIENTES NO MONGO (/api/patients) - CORRIGIDAS
 // ==============================================================================
 
-// LISTAR PACIENTES (Doutora)
+// 🔥 LISTAR PACIENTES (CORRIGIDO: Retorna TODOS, incluindo pendentes)
 app.get('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { search, treatmentType, status } = req.query;
     const filter = {};
 
-    if (!status) {
-      filter.status = { $ne: 'aguardando_aprovacao' };
+    // 🔥 CORREÇÃO: Só filtra por status se for passado na query
+    if (status && status !== 'todos' && status !== 'all') {
+      filter.status = status;
     }
+    // Se NÃO passou status, retorna TODOS (incluindo pendentes)
 
     if (search) {
       filter.$or = [
@@ -647,38 +608,49 @@ app.get('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
       ];
     }
     if (treatmentType) filter.treatmentType = treatmentType;
-    if (status && status !== 'todos') filter.status = status;
+
+    console.log('🔍 Filtro aplicado em /patients:', filter);
 
     const patients = await Patient.find(filter).sort({ createdAt: -1 });
+    
+    console.log(`📋 Encontrados ${patients.length} pacientes`);
 
     const patientsFormatted = patients.map(p => ({
       id: p._id.toString(),
       userId: p.userId ? p.userId.toString() : null,
-      name: p.name,
-      email: p.email,
-      phone: p.phone,
-      birthDate: p.birthDate,
-      gender: p.gender,
-      occupation: p.occupation,
-      emergencyContact: p.emergencyContact,
-      emergencyPhone: p.emergencyPhone,
-      address: p.address,
-      status: p.status,
-      treatmentType: p.treatmentType,
-      notes: p.notes,
-      totalSessions: p.totalSessions,
-      lastVisit: p.lastVisit,
+      name: p.name || 'Sem nome',
+      email: p.email || '',
+      phone: p.phone || '',
+      birthDate: p.birthDate || '',
+      gender: p.gender || 'Feminino',
+      occupation: p.occupation || '',
+      emergencyContact: p.emergencyContact || '',
+      emergencyPhone: p.emergencyPhone || '',
+      address: p.address || '',
+      status: p.status || 'ativo',
+      treatmentType: p.treatmentType || 'Massoterapia e Estética Corporal',
+      notes: p.notes || '',
+      totalSessions: p.totalSessions || 0,
+      lastVisit: p.lastVisit || '',
       exams: p.exams || [],
       createdAt: p.createdAt ? p.createdAt.toISOString().split('T')[0] : ''
     }));
 
-    res.json({ success: true, total: patientsFormatted.length, patients: patientsFormatted });
+    res.json({ 
+      success: true, 
+      total: patientsFormatted.length, 
+      patients: patientsFormatted 
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('❌ Erro em /patients:', err.message);
+    res.status(500).json({ 
+      success: false, 
+      error: err.message 
+    });
   }
 });
 
-// CRIAR PACIENTE PELA DOUTORA (Amarração automática com usuário pelo mesmo e-mail)
+// CRIAR PACIENTE PELA DOUTORA
 app.post('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { 
@@ -697,10 +669,8 @@ app.post('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
       return res.status(400).json({ error: 'Já existe um paciente cadastrado com este e-mail' });
     }
 
-    // AMARRAÇÃO: Verifica se o usuário já havia criado conta com este e-mail
     let user = await User.findOne({ email: cleanEmail });
     if (!user) {
-      // Cria a conta do usuário para permitir login futuro pelo paciente
       const defaultHash = await bcrypt.hash('123456', 10);
       user = await User.create({
         name: name.trim(),
@@ -715,7 +685,6 @@ app.post('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
       });
       console.log(`👤 Usuário gerado automaticamente para o paciente: ${cleanEmail}`);
     } else {
-      // Se já existia conta de usuário, amarra e aprova
       user.status = 'approved';
       user.isApproved = true;
       await user.save();
@@ -770,7 +739,6 @@ app.post('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
   }
 });
 
-// BUSCAR PACIENTE POR ID (com exames e anamnese)
 app.get('/api/patients/:id', authMiddleware, async (req, res) => {
   try {
     const patient = await Patient.findById(req.params.id);
@@ -807,7 +775,6 @@ app.get('/api/patients/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// ATUALIZAR PACIENTE PELA DOUTORA (Reflete imediatamente para o cliente)
 app.put('/api/patients/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { 
@@ -833,7 +800,6 @@ app.put('/api/patients/:id', authMiddleware, requireDoctor, async (req, res) => 
     const patient = await Patient.findByIdAndUpdate(req.params.id, updateData, { new: true });
     if (!patient) return res.status(404).json({ error: 'Paciente não encontrado' });
 
-    // Sincroniza nome e telefone no usuário amarrado
     if (patient.userId) {
       await User.findByIdAndUpdate(patient.userId, {
         name: patient.name,
@@ -870,7 +836,6 @@ app.put('/api/patients/:id', authMiddleware, requireDoctor, async (req, res) => 
   }
 });
 
-// DELETAR PACIENTE
 app.delete('/api/patients/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const patient = await Patient.findById(req.params.id);
@@ -893,10 +858,8 @@ app.delete('/api/patients/:id', authMiddleware, requireDoctor, async (req, res) 
   }
 });
 
-// PERFIL DO PACIENTE LOGADO (/api/patients/me)
 app.get('/api/patients/me', authMiddleware, async (req, res) => {
   try {
-    // Procura por userId ou por email
     let patient = await Patient.findOne({
       $or: [
         { userId: req.user.id },
@@ -908,7 +871,6 @@ app.get('/api/patients/me', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'Ficha de paciente não encontrada para este usuário' });
     }
 
-    // Garante amarração mútua se ainda não estava gravada
     if (!patient.userId) {
       patient.userId = req.user.id;
       await patient.save();
@@ -942,46 +904,86 @@ app.get('/api/patients/me', authMiddleware, async (req, res) => {
   }
 });
 
-// PACIENTES PENDENTES DE APROVAÇÃO
+// 🔥 PACIENTES PENDENTES DE APROVAÇÃO (CORRIGIDO: Tratamento de erro robusto)
 app.get('/api/patients/pending', authMiddleware, requireDoctor, async (req, res) => {
   try {
+    console.log('📤 Buscando pacientes pendentes...');
+    
     const pendingPatients = await Patient.find({ 
       status: 'aguardando_aprovacao' 
     }).sort({ createdAt: -1 });
     
+    console.log(`📋 Encontrados ${pendingPatients.length} pacientes pendentes`);
+    
+    if (pendingPatients.length === 0) {
+      return res.json({ 
+        success: true, 
+        total: 0,
+        patients: [] 
+      });
+    }
+    
     const patientsWithUsers = await Promise.all(pendingPatients.map(async (p) => {
-      let user = null;
-      if (p.userId) {
-        user = await User.findById(p.userId).select('-password');
+      try {
+        let userData = null;
+        
+        if (p.userId) {
+          try {
+            const user = await User.findById(p.userId).select('-password');
+            if (user) {
+              userData = {
+                id: user._id.toString(),
+                name: user.name || 'Usuário sem nome',
+                email: user.email || '',
+                phone: user.phone || '',
+                status: user.status || 'pending'
+              };
+            }
+          } catch (userErr) {
+            console.warn(`⚠️ Erro ao buscar usuário:`, userErr.message);
+          }
+        }
+        
+        return {
+          id: p._id.toString(),
+          userId: p.userId ? p.userId.toString() : null,
+          name: p.name || 'Nome não informado',
+          email: p.email || '',
+          phone: p.phone || '',
+          status: p.status || 'aguardando_aprovacao',
+          treatmentType: p.treatmentType || 'Massoterapia e Estética Corporal',
+          exams: p.exams || [],
+          createdAt: p.createdAt || new Date(),
+          user: userData
+        };
+      } catch (err) {
+        console.error('❌ Erro ao processar paciente:', err.message);
+        return {
+          id: p._id ? p._id.toString() : 'erro',
+          name: p.name || 'Erro ao carregar',
+          email: p.email || '',
+          phone: p.phone || '',
+          status: 'erro',
+          error: err.message
+        };
       }
-      if (!user && p.email) {
-        user = await User.findOne({ email: p.email }).select('-password');
-      }
-
-      return {
-        id: p._id.toString(),
-        userId: p.userId ? p.userId.toString() : (user ? user._id.toString() : null),
-        name: p.name,
-        email: p.email,
-        phone: p.phone,
-        status: p.status,
-        treatmentType: p.treatmentType,
-        exams: p.exams || [],
-        createdAt: p.createdAt ? p.createdAt.toISOString() : new Date().toISOString(),
-        user: user ? {
-          id: user._id.toString(),
-          name: user.name,
-          email: user.email,
-          phone: user.phone,
-          status: user.status,
-          createdAt: user.createdAt ? user.createdAt.toISOString() : ''
-        } : null
-      };
     }));
     
-    res.json({ success: true, count: patientsWithUsers.length, patients: patientsWithUsers });
+    res.json({ 
+      success: true, 
+      total: patientsWithUsers.length,
+      patients: patientsWithUsers 
+    });
+    
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('❌ ERRO CRÍTICO em /patients/pending:', err.message);
+    console.error('Stack:', err.stack);
+    
+    res.status(500).json({ 
+      success: false, 
+      error: 'Erro ao buscar pacientes pendentes',
+      details: err.message
+    });
   }
 });
 
@@ -1014,12 +1016,11 @@ app.get('/api/users/pending', authMiddleware, requireDoctor, async (req, res) =>
   }
 });
 
-// APROVAR PACIENTE (aceita ID do Paciente ou ID do Usuário)
+// APROVAR PACIENTE
 app.post('/api/patients/approve/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { id } = req.params;
     
-    // Tenta encontrar por ID do paciente ou por userId
     let patient = await Patient.findById(id);
     if (!patient) {
       patient = await Patient.findOne({ userId: id });
@@ -1078,7 +1079,6 @@ app.post('/api/patients/approve/:id', authMiddleware, requireDoctor, async (req,
   }
 });
 
-// APROVAR USUÁRIO DIRETAMENTE
 app.post('/api/users/:id/approve', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1122,7 +1122,6 @@ app.post('/api/users/:id/approve', authMiddleware, requireDoctor, async (req, re
   }
 });
 
-// REJEITAR USUÁRIO DIRETAMENTE
 app.post('/api/users/:id/reject', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1144,7 +1143,6 @@ app.post('/api/users/:id/reject', authMiddleware, requireDoctor, async (req, res
   }
 });
 
-// REJEITAR PACIENTE
 app.post('/api/patients/reject/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1176,7 +1174,6 @@ app.post('/api/patients/reject/:id', authMiddleware, requireDoctor, async (req, 
   }
 });
 
-// VINCULAR PACIENTE EXISTENTE MANUALMENTE
 app.post('/api/patients/link', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { email, patientId, userId } = req.body;
@@ -1225,11 +1222,9 @@ app.post('/api/patients/link', authMiddleware, requireDoctor, async (req, res) =
 });
 
 // ==============================================================================
-// 4. ROTAS DE ANEXAR EXAMES (/api/patients/:id/exams & /api/patients/me/exams)
-// Suporte para a Doutora e para o Paciente anexarem laudos, imagens e exames
+// 4. ROTAS DE ANEXAR EXAMES
 // ==============================================================================
 
-// ANEXAR EXAME AO PACIENTE (Doutora ou Usuário autorizado)
 app.post('/api/patients/:id/exams', authMiddleware, async (req, res) => {
   try {
     const { title, category, date, fileUrl, fileName, fileType, fileSize, notes } = req.body;
@@ -1276,7 +1271,6 @@ app.post('/api/patients/:id/exams', authMiddleware, async (req, res) => {
   }
 });
 
-// LISTAR EXAMES DO PACIENTE
 app.get('/api/patients/:id/exams', authMiddleware, async (req, res) => {
   try {
     const patient = await Patient.findById(req.params.id);
@@ -1287,7 +1281,6 @@ app.get('/api/patients/:id/exams', authMiddleware, async (req, res) => {
   }
 });
 
-// REMOVER EXAME ANEXADO
 app.delete('/api/patients/:id/exams/:examId', authMiddleware, async (req, res) => {
   try {
     const { id, examId } = req.params;
@@ -1303,7 +1296,6 @@ app.delete('/api/patients/:id/exams/:examId', authMiddleware, async (req, res) =
   }
 });
 
-// PACIENTE ANEXA EXAME NA SUA PRÓPRIA FICHA
 app.post('/api/patients/me/exams', authMiddleware, async (req, res) => {
   try {
     const patient = await Patient.findOne({
@@ -1350,10 +1342,8 @@ app.post('/api/patients/me/exams', authMiddleware, async (req, res) => {
 
 // ==============================================================================
 // 5. ROTAS DE PERGUNTAS NO BANCO (/api/questions)
-// Gerenciamento e persistência das perguntas da anamnese
 // ==============================================================================
 
-// LISTAR PERGUNTAS DA ANAMNESE
 app.get('/api/questions', async (req, res) => {
   try {
     let questions = await Question.find().sort({ order: 1, createdAt: 1 });
@@ -1383,7 +1373,6 @@ app.get('/api/questions', async (req, res) => {
   }
 });
 
-// ADICIONAR NOVA PERGUNTA
 app.post('/api/questions', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { id, categoryId, label, subtitle, type, options, placeholder, required, isAlertTrigger, alertMessage } = req.body;
@@ -1413,7 +1402,6 @@ app.post('/api/questions', authMiddleware, requireDoctor, async (req, res) => {
   }
 });
 
-// ATUALIZAR PERGUNTA
 app.put('/api/questions/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const question = await Question.findOneAndUpdate(
@@ -1428,7 +1416,6 @@ app.put('/api/questions/:id', authMiddleware, requireDoctor, async (req, res) =>
   }
 });
 
-// REMOVER PERGUNTA
 app.delete('/api/questions/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const question = await Question.findOneAndDelete({ id: req.params.id });
@@ -1439,7 +1426,6 @@ app.delete('/api/questions/:id', authMiddleware, requireDoctor, async (req, res)
   }
 });
 
-// REINICIALIZAR PERGUNTAS PADRÃO
 app.post('/api/questions/seed', authMiddleware, requireDoctor, async (req, res) => {
   try {
     await Question.deleteMany({});
@@ -1455,7 +1441,6 @@ app.post('/api/questions/seed', authMiddleware, requireDoctor, async (req, res) 
 // 6. ROTAS DE FICHAS DE ANAMNESE (/api/anamnesis)
 // ==============================================================================
 
-// SALVAR FICHA DE ANAMNESE (Doutora)
 app.post('/api/anamnesis', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { 
@@ -1486,7 +1471,6 @@ app.post('/api/anamnesis', authMiddleware, requireDoctor, async (req, res) => {
       status: 'concluido'
     });
     
-    // Atualiza número de sessões e última visita na ficha do paciente
     await Patient.findByIdAndUpdate(patientId, {
       $inc: { totalSessions: 1 },
       lastVisit: new Date().toISOString().split('T')[0]
@@ -1515,7 +1499,6 @@ app.post('/api/anamnesis', authMiddleware, requireDoctor, async (req, res) => {
   }
 });
 
-// LISTAR TODAS AS ANAMNESES (Doutora)
 app.get('/api/anamnesis', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const rawRecords = await Anamnesis.find().sort({ createdAt: -1 });
@@ -1539,7 +1522,6 @@ app.get('/api/anamnesis', authMiddleware, requireDoctor, async (req, res) => {
   }
 });
 
-// BUSCAR ANAMNESE POR ID DO PACIENTE
 app.get('/api/anamnesis/patient/:patientId', authMiddleware, async (req, res) => {
   try {
     const rawRecords = await Anamnesis.find({ patientId: req.params.patientId }).sort({ createdAt: -1 });
@@ -1563,7 +1545,6 @@ app.get('/api/anamnesis/patient/:patientId', authMiddleware, async (req, res) =>
   }
 });
 
-// MINHAS ANAMNESES (Paciente logado)
 app.get('/api/anamnesis/my', authMiddleware, async (req, res) => {
   try {
     const patient = await Patient.findOne({
@@ -1602,7 +1583,6 @@ app.get('/api/anamnesis/my', authMiddleware, async (req, res) => {
 // 7. ROTAS DE AGENDAMENTO (/api/appointments)
 // ==============================================================================
 
-// AGENDAR CONSULTA
 app.post('/api/appointments', authMiddleware, async (req, res) => {
   try {
     const { patientId, service, date, time, notes } = req.body;
@@ -1656,7 +1636,6 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
   }
 });
 
-// MINHAS CONSULTAS (Paciente logado)
 app.get('/api/appointments/my', authMiddleware, async (req, res) => {
   try {
     const patient = await Patient.findOne({
@@ -1690,7 +1669,6 @@ app.get('/api/appointments/my', authMiddleware, async (req, res) => {
   }
 });
 
-// TODAS AS CONSULTAS (Doutora)
 app.get('/api/appointments', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const raw = await Appointment.find().sort({ date: 1, time: 1 });
@@ -1713,7 +1691,6 @@ app.get('/api/appointments', authMiddleware, requireDoctor, async (req, res) => 
   }
 });
 
-// ATUALIZAR STATUS DA CONSULTA
 app.patch('/api/appointments/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const appointment = await Appointment.findByIdAndUpdate(
@@ -1870,11 +1847,10 @@ async function seedDefaultQuestionsIfEmpty(force = false) {
 }
 
 // ==============================================================================
-// INICIALIZAÇÃO DO SERVIDOR COM INTEGRAÇÃO VITE
+// INICIALIZAÇÃO DO SERVIDOR
 // ==============================================================================
 
 async function startServer() {
-  // Em desenvolvimento (ou AI Studio container): monta middleware do Vite
   if (process.env.NODE_ENV !== 'production') {
     try {
       const { createServer: createViteServer } = await import('vite');
@@ -1888,7 +1864,6 @@ async function startServer() {
       console.warn('⚠️ Vite dev middleware não inicializado:', err.message);
     }
   } else {
-    // Em produção (Render ou container isolado)
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
