@@ -24,7 +24,6 @@ const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://dev:dev123@cluster0.of
 
 // ==============================================================================
 // 🔥 CONFIGURAÇÃO ROBUSTA DE CORS
-// Suporta: Localhost (3000, 5000, 5173), Render, GitHub Pages, Vercel, Netlify
 // ==============================================================================
 
 const allowedOrigins = [
@@ -588,17 +587,18 @@ app.delete('/api/users/:id', authMiddleware, requireDoctor, async (req, res) => 
 // 3. ROTAS DE PACIENTES NO MONGO (/api/patients) - CORRIGIDAS
 // ==============================================================================
 
-// 🔥 LISTAR PACIENTES (CORRIGIDO: Retorna TODOS, incluindo pendentes)
+// 🔥 LISTAR PACIENTES (CORRIGIDO: Mostra APENAS pacientes ATIVOS)
 app.get('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { search, treatmentType, status } = req.query;
     const filter = {};
 
-    // 🔥 CORREÇÃO: Só filtra por status se for passado na query
-    if (status && status !== 'todos' && status !== 'all') {
+    // 🔥 CORREÇÃO: Por padrão, mostra APENAS pacientes ATIVOS
+    if (!status || status === 'todos' || status === 'all') {
+      filter.status = { $in: ['ativo', 'retorno_pendente'] };
+    } else {
       filter.status = status;
     }
-    // Se NÃO passou status, retorna TODOS (incluindo pendentes)
 
     if (search) {
       filter.$or = [
@@ -609,11 +609,11 @@ app.get('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
     }
     if (treatmentType) filter.treatmentType = treatmentType;
 
-    console.log('🔍 Filtro aplicado em /patients:', filter);
+    console.log('🔍 Filtro aplicado em /patients (ativos):', filter);
 
     const patients = await Patient.find(filter).sort({ createdAt: -1 });
     
-    console.log(`📋 Encontrados ${patients.length} pacientes`);
+    console.log(`📋 Encontrados ${patients.length} pacientes ativos`);
 
     const patientsFormatted = patients.map(p => ({
       id: p._id.toString(),
