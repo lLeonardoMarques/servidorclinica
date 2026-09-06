@@ -292,16 +292,18 @@ app.post('/api/auth/register', async (req, res) => {
     
     const existingUser = await User.findOne({ email: cleanEmail });
     if (existingUser) {
-      return res.status(400).json({ error: 'E-mail já cadastrado no sistema' });
+      return res.status(400).json({ error: 'E-mail já cadastrado no sistema. Por favor, faça login.' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const assignedRole = role === 'DOCTOR' ? 'DOCTOR' : 'PATIENT';
 
     // AMARRAÇÃO AUTOMÁTICA POR E-MAIL:
-    // Verifica se a Dra. Yasmin já havia cadastrado o paciente com este e-mail
+    // Verifica se a Dra. Yasmin (única administradora) já inseriu um paciente com este exato e-mail
     const existingPatient = await Patient.findOne({ email: cleanEmail });
 
+    // Se o e-mail for IGUAL ao cadastrado pela doutora, é aprovado automaticamente!
+    // Se for DIFERENTE, fica pendente de aprovação da Dra. Yasmin.
     const isAutoApproved = assignedRole === 'DOCTOR' || !!existingPatient;
 
     const newUser = await User.create({
@@ -323,9 +325,9 @@ app.post('/api/auth/register', async (req, res) => {
         existingPatient.status = 'ativo';
         await existingPatient.save();
         patientRecord = existingPatient;
-        console.log(`🔗 Paciente existente vinculado ao novo usuário: ${cleanEmail}`);
+        console.log(`🔗 Paciente existente vinculado e aprovado automaticamente: ${cleanEmail}`);
       } else {
-        // Cria paciente aguardando aprovação
+        // E-mail diferente: Cria paciente com status 'aguardando_aprovacao'
         patientRecord = await Patient.create({
           userId: newUser._id,
           name: newUser.name,
@@ -334,22 +336,45 @@ app.post('/api/auth/register', async (req, res) => {
           status: 'aguardando_aprovacao',
           treatmentType: 'Massoterapia e Estética Corporal'
         });
-        console.log(`✅ Novo paciente criado aguardando aprovação: ${cleanEmail}`);
+        console.log(`⏳ Novo cadastro pendente de aprovação pela Dra. Yasmin: ${cleanEmail}`);
       }
     }
 
-    const token = jwt.sign(
-      { id: newUser._id.toString(), role: newUser.role, email: newUser.email, status: newUser.status, name: newUser.name },
-      JWT_SECRET,
-      { expiresIn: '30d' }
-    );
+    // Se aprovado automaticamente, gera token de acesso direto
+    if (isAutoApproved) {
+      const token = jwt.sign(
+        { id: newUser._id.toString(), role: newUser.role, email: newUser.email, status: newUser.status, name: newUser.name },
+        JWT_SECRET,
+        { expiresIn: '30d' }
+      );
 
-    res.status(201).json({
+      return res.status(201).json({
+        success: true,
+        autoApproved: true,
+        message: existingPatient 
+          ? 'Cadastro aprovado! Sua ficha clínica foi vinculada com sucesso.'
+          : 'Cadastro realizado com sucesso!',
+        token,
+        user: {
+          id: newUser._id.toString(),
+          name: newUser.name,
+          email: newUser.email,
+          phone: newUser.phone,
+          role: newUser.role,
+          status: newUser.status,
+          isApproved: newUser.isApproved
+        },
+        patient: patientRecord,
+        isExistingPatient: !!existingPatient
+      });
+    }
+
+    // Se pendente de aprovação (e-mail diferente da base da Dra. Yasmin):
+    return res.status(201).json({
       success: true,
-      message: existingPatient 
-        ? 'Cadastro realizado! Sua ficha clínica foi vinculada com sucesso.'
-        : 'Cadastro realizado com sucesso!',
-      token,
+      autoApproved: false,
+      requiresApproval: true,
+      message: 'Cadastro realizado com sucesso! Como seu e-mail ainda não constava na base clínica da Dra. Yasmin, seu cadastro foi enviado para aprovação da doutora antes da liberação do acesso.',
       user: {
         id: newUser._id.toString(),
         name: newUser.name,
@@ -360,15 +385,16 @@ app.post('/api/auth/register', async (req, res) => {
         isApproved: newUser.isApproved
       },
       patient: patientRecord,
-      isExistingPatient: !!existingPatient
+      isExistingPatient: false
     });
+
   } catch (err) {
     console.error('Erro no registro:', err);
     res.status(500).json({ error: err.message || 'Erro interno ao cadastrar usuário' });
   }
 });
 
-// LOGIN
+// LOGIN COM VALIDAÇÃO RIGOROSA
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -378,19 +404,39 @@ app.post('/api/auth/login', async (req, res) => {
 
     const cleanEmail = email.toLowerCase().trim();
     const user = await User.findOne({ email: cleanEmail });
+    
+    // Se o e-mail não existe no banco de dados, retorna erro claro
     if (!user) {
-      return res.status(401).json({ error: 'Credenciais inválidas' });
+      return res.status(401).json({ 
+        error: 'E-mail não cadastrado. Verifique a digitação ou crie sua conta na opção "Novo Usuário".',
+        code: 'EMAIL_NOT_FOUND' 
+      });
     }
 
+    // Se a senha não confere, retorna erro claro
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(401).json({ error: 'Credenciais inválidas' });
+      return res.status(401).json({ 
+        error: 'Senha incorreta. Verifique os dados digitados e tente novamente.',
+        code: 'INVALID_PASSWORD' 
+      });
     }
 
+    // Bloqueia acesso se o cadastro do paciente ainda estiver pendente de aprovação pela Dra. Yasmin
+    if (user.role === 'PATIENT' && (user.status === 'pending' || !user.isApproved)) {
+      return res.status(403).json({ 
+        error: 'Seu cadastro está pendente de aprovação pela Dra. Yasmin. Aguarde a liberação do seu acesso pela administração da clínica.',
+        status: 'pending',
+        code: 'ACCOUNT_PENDING'
+      });
+    }
+
+    // Bloqueia se foi rejeitado
     if (user.role === 'PATIENT' && user.status === 'rejected') {
       return res.status(403).json({ 
-        error: 'Seu cadastro não foi aprovado pela administração.',
-        status: user.status 
+        error: 'Seu cadastro não foi aprovado pela administração da clínica.',
+        status: user.status,
+        code: 'ACCOUNT_REJECTED'
       });
     }
 
@@ -904,64 +950,195 @@ app.get('/api/patients/pending', authMiddleware, requireDoctor, async (req, res)
     }).sort({ createdAt: -1 });
     
     const patientsWithUsers = await Promise.all(pendingPatients.map(async (p) => {
-      const user = await User.findById(p.userId).select('-password');
+      let user = null;
+      if (p.userId) {
+        user = await User.findById(p.userId).select('-password');
+      }
+      if (!user && p.email) {
+        user = await User.findOne({ email: p.email }).select('-password');
+      }
+
       return {
         id: p._id.toString(),
-        userId: p.userId ? p.userId.toString() : null,
+        userId: p.userId ? p.userId.toString() : (user ? user._id.toString() : null),
         name: p.name,
         email: p.email,
         phone: p.phone,
         status: p.status,
         treatmentType: p.treatmentType,
         exams: p.exams || [],
-        createdAt: p.createdAt,
+        createdAt: p.createdAt ? p.createdAt.toISOString() : new Date().toISOString(),
         user: user ? {
           id: user._id.toString(),
           name: user.name,
           email: user.email,
           phone: user.phone,
-          status: user.status
+          status: user.status,
+          createdAt: user.createdAt ? user.createdAt.toISOString() : ''
         } : null
       };
     }));
     
-    res.json({ success: true, patients: patientsWithUsers });
+    res.json({ success: true, count: patientsWithUsers.length, patients: patientsWithUsers });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// APROVAR PACIENTE
+// LISTA DE USUÁRIOS PENDENTES
+app.get('/api/users/pending', authMiddleware, requireDoctor, async (req, res) => {
+  try {
+    const pendingUsers = await User.find({
+      $or: [{ status: 'pending' }, { isApproved: false }],
+      role: 'PATIENT'
+    }).select('-password').sort({ createdAt: -1 });
+
+    const formatted = await Promise.all(pendingUsers.map(async (u) => {
+      const patient = await Patient.findOne({ $or: [{ userId: u._id }, { email: u.email }] });
+      return {
+        id: u._id.toString(),
+        name: u.name,
+        email: u.email,
+        phone: u.phone,
+        status: u.status,
+        isApproved: u.isApproved,
+        createdAt: u.createdAt,
+        patientId: patient ? patient._id.toString() : null,
+        patientStatus: patient ? patient.status : null
+      };
+    }));
+
+    res.json({ success: true, count: formatted.length, users: formatted });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// APROVAR PACIENTE (aceita ID do Paciente ou ID do Usuário)
 app.post('/api/patients/approve/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { id } = req.params;
-    const patient = await Patient.findById(id);
-    if (!patient) return res.status(404).json({ error: 'Paciente não encontrado' });
+    
+    // Tenta encontrar por ID do paciente ou por userId
+    let patient = await Patient.findById(id);
+    if (!patient) {
+      patient = await Patient.findOne({ userId: id });
+    }
 
-    patient.status = 'ativo';
-    patient.approvedBy = req.user.id;
-    patient.approvedAt = new Date();
-    await patient.save();
+    let user = null;
+    if (patient?.userId) {
+      user = await User.findById(patient.userId);
+    } else {
+      user = await User.findById(id);
+      if (user && !patient) {
+        patient = await Patient.findOne({ email: user.email });
+      }
+    }
 
-    if (patient.userId) {
-      await User.findByIdAndUpdate(patient.userId, {
-        status: 'approved',
-        isApproved: true,
-        approvedBy: req.user.id,
-        approvedAt: new Date()
-      });
+    if (!patient && !user) {
+      return res.status(404).json({ error: 'Cadastro não encontrado para aprovação' });
+    }
+
+    if (patient) {
+      patient.status = 'ativo';
+      patient.approvedBy = req.user.id;
+      patient.approvedAt = new Date();
+      if (user && !patient.userId) {
+        patient.userId = user._id;
+      }
+      await patient.save();
+    }
+
+    if (user) {
+      user.status = 'approved';
+      user.isApproved = true;
+      user.approvedBy = req.user.id;
+      user.approvedAt = new Date();
+      await user.save();
     }
 
     res.json({
       success: true,
-      message: 'Paciente aprovado com sucesso!',
-      patient: {
+      message: 'Paciente e usuário aprovados com sucesso! O acesso ao sistema está liberado.',
+      patient: patient ? {
         id: patient._id.toString(),
         name: patient.name,
         email: patient.email,
         status: patient.status
-      }
+      } : null,
+      user: user ? {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        status: user.status
+      } : null
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// APROVAR USUÁRIO DIRETAMENTE
+app.post('/api/users/:id/approve', authMiddleware, requireDoctor, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    user.status = 'approved';
+    user.isApproved = true;
+    user.approvedBy = req.user.id;
+    user.approvedAt = new Date();
+    await user.save();
+
+    const patient = await Patient.findOneAndUpdate(
+      { $or: [{ userId: user._id }, { email: user.email }] },
+      { 
+        status: 'ativo', 
+        userId: user._id,
+        approvedBy: req.user.id,
+        approvedAt: new Date()
+      },
+      { new: true }
+    );
+
+    res.json({
+      success: true,
+      message: 'Usuário aprovado com sucesso!',
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        status: user.status
+      },
+      patient: patient ? {
+        id: patient._id.toString(),
+        name: patient.name,
+        status: patient.status
+      } : null
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// REJEITAR USUÁRIO DIRETAMENTE
+app.post('/api/users/:id/reject', authMiddleware, requireDoctor, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    user.status = 'rejected';
+    user.isApproved = false;
+    await user.save();
+
+    await Patient.findOneAndUpdate(
+      { $or: [{ userId: user._id }, { email: user.email }] },
+      { status: 'inativo' }
+    );
+
+    res.json({ success: true, message: 'Usuário recusado' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -971,20 +1148,29 @@ app.post('/api/patients/approve/:id', authMiddleware, requireDoctor, async (req,
 app.post('/api/patients/reject/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { id } = req.params;
-    const patient = await Patient.findById(id);
-    if (!patient) return res.status(404).json({ error: 'Paciente não encontrado' });
+    let patient = await Patient.findById(id);
+    if (!patient) {
+      patient = await Patient.findOne({ userId: id });
+    }
 
-    patient.status = 'inativo';
-    await patient.save();
+    if (patient) {
+      patient.status = 'inativo';
+      await patient.save();
 
-    if (patient.userId) {
-      await User.findByIdAndUpdate(patient.userId, {
+      if (patient.userId) {
+        await User.findByIdAndUpdate(patient.userId, {
+          status: 'rejected',
+          isApproved: false
+        });
+      }
+    } else {
+      await User.findByIdAndUpdate(id, {
         status: 'rejected',
         isApproved: false
       });
     }
 
-    res.json({ success: true, message: 'Paciente rejeitado com sucesso' });
+    res.json({ success: true, message: 'Cadastro recusado com sucesso' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
