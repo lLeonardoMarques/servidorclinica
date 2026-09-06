@@ -272,52 +272,89 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     const cleanEmail = email.toLowerCase().trim();
+    const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
     
-    const existingUser = await User.findOne({ email: cleanEmail });
-    if (existingUser) {
-      return res.status(400).json({ error: 'E-mail já cadastrado no sistema. Por favor, faça login.' });
+    // Proteger contas administrativas
+    if (cleanEmail === 'dra.yasmin@clinica.com' || cleanEmail === 'admin@toquedabeleza.com') {
+      return res.status(400).json({ error: 'Este e-mail pertence à administração da clínica. Por favor, faça login.' });
+    }
+
+    let existingUser = await User.findOne({ email: emailRegex });
+    if (existingUser && existingUser.role === 'DOCTOR') {
+      return res.status(400).json({ error: 'Este e-mail pertence à administração da clínica. Por favor, faça login.' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const assignedRole = role === 'DOCTOR' ? 'DOCTOR' : 'PATIENT';
-    const existingPatient = await Patient.findOne({ email: cleanEmail });
-    const isAutoApproved = assignedRole === 'DOCTOR' || !!existingPatient;
 
-    const newUser = await User.create({
-      name: name.trim(),
-      email: cleanEmail,
-      phone: phone.trim(),
-      password: hashedPassword,
-      role: assignedRole,
-      status: isAutoApproved ? 'approved' : 'pending',
-      isApproved: isAutoApproved
-    });
-
-    let patientRecord = null;
-
-    if (assignedRole === 'PATIENT') {
-      if (existingPatient) {
-        existingPatient.userId = newUser._id;
-        existingPatient.status = 'ativo';
-        await existingPatient.save();
-        patientRecord = existingPatient;
-        console.log(`🔗 Paciente existente vinculado e aprovado automaticamente: ${cleanEmail}`);
-      } else {
-        patientRecord = await Patient.create({
-          userId: newUser._id,
-          name: newUser.name,
-          email: newUser.email,
-          phone: newUser.phone,
-          status: 'aguardando_aprovacao',
-          treatmentType: 'Massoterapia e Estética Corporal'
-        });
-        console.log(`⏳ Novo cadastro pendente de aprovação pela Dra. Yasmin: ${cleanEmail}`);
-      }
+    // 1. Verificar se a Doutora já havia iniciado/cadastrado este paciente na clínica
+    let existingPatient = await Patient.findOne({ email: emailRegex });
+    if (!existingPatient && existingUser) {
+      existingPatient = await Patient.findOne({ userId: existingUser._id });
     }
 
-    if (isAutoApproved) {
+    // REGRA SOLICITADA:
+    // "se o novo usuario colocar um email que ja existe e que a doutora iniciou e colocou,
+    //  deve ser cadastrado pois a doutora cadastrou e depois o cliente foi adentrar a aplicação para acompanhar"
+    if (existingPatient || (existingUser && existingUser.role === 'PATIENT')) {
+      console.log(`✨ Paciente pré-cadastrado pela Dra. Yasmin está ativando sua conta no portal: ${cleanEmail}`);
+
+      let userRecord = existingUser;
+      if (!userRecord) {
+        userRecord = await User.create({
+          name: name.trim(),
+          email: cleanEmail,
+          phone: phone.trim(),
+          password: hashedPassword,
+          role: 'PATIENT',
+          status: 'approved',
+          isApproved: true,
+          approvedAt: new Date()
+        });
+      } else {
+        // Atualiza a senha que o paciente acabou de escolher no "Novo Usuário" e ativa
+        userRecord.password = hashedPassword;
+        if (name && name.trim()) userRecord.name = name.trim();
+        if (phone && phone.trim()) userRecord.phone = phone.trim();
+        userRecord.role = 'PATIENT';
+        userRecord.status = 'approved';
+        userRecord.isApproved = true;
+        if (!userRecord.approvedAt) userRecord.approvedAt = new Date();
+        await userRecord.save();
+      }
+
+      // Sincroniza a ficha do paciente para ativo
+      let patientRecord = existingPatient;
+      if (patientRecord) {
+        patientRecord.userId = userRecord._id;
+        patientRecord.status = 'ativo';
+        if (!patientRecord.phone || patientRecord.phone.trim() === '') {
+          patientRecord.phone = phone.trim();
+        }
+        if (!patientRecord.name || patientRecord.name === 'Sem nome' || patientRecord.name.trim() === '') {
+          patientRecord.name = name.trim();
+        }
+        if (!patientRecord.approvedAt) patientRecord.approvedAt = new Date();
+        await patientRecord.save();
+      } else {
+        patientRecord = await Patient.create({
+          userId: userRecord._id,
+          name: userRecord.name,
+          email: cleanEmail,
+          phone: userRecord.phone,
+          status: 'ativo',
+          treatmentType: 'Massoterapia e Estética Corporal',
+          approvedAt: new Date()
+        });
+      }
+
       const token = jwt.sign(
-        { id: newUser._id.toString(), role: newUser.role, email: newUser.email, status: newUser.status, name: newUser.name },
+        { 
+          id: userRecord._id.toString(), 
+          role: userRecord.role, 
+          email: userRecord.email, 
+          status: userRecord.status, 
+          name: userRecord.name 
+        },
         JWT_SECRET,
         { expiresIn: '30d' }
       );
@@ -325,23 +362,51 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(201).json({
         success: true,
         autoApproved: true,
-        message: existingPatient 
-          ? 'Cadastro aprovado! Sua ficha clínica foi vinculada com sucesso.'
-          : 'Cadastro realizado com sucesso!',
+        isExistingPatient: true,
+        message: `Cadastro ativado com sucesso! Sua ficha clínica já havia sido iniciada pela Dra. Yasmin. Seu acesso ao portal está liberado para acompanhar seu prontuário e sessões.`,
         token,
         user: {
-          id: newUser._id.toString(),
-          name: newUser.name,
-          email: newUser.email,
-          phone: newUser.phone,
-          role: newUser.role,
-          status: newUser.status,
-          isApproved: newUser.isApproved
+          id: userRecord._id.toString(),
+          name: userRecord.name,
+          email: userRecord.email,
+          phone: userRecord.phone,
+          role: userRecord.role,
+          status: userRecord.status,
+          isApproved: userRecord.isApproved
         },
-        patient: patientRecord,
-        isExistingPatient: !!existingPatient
+        patient: {
+          id: patientRecord._id.toString(),
+          userId: patientRecord.userId?.toString(),
+          name: patientRecord.name,
+          email: patientRecord.email,
+          phone: patientRecord.phone,
+          status: patientRecord.status,
+          treatmentType: patientRecord.treatmentType
+        }
       });
     }
+
+    // 2. Cenário: Usuário totalmente novo (e-mail nunca antes cadastrado pela doutora)
+    const newUser = await User.create({
+      name: name.trim(),
+      email: cleanEmail,
+      phone: phone.trim(),
+      password: hashedPassword,
+      role: 'PATIENT',
+      status: 'pending',
+      isApproved: false
+    });
+
+    const newPatient = await Patient.create({
+      userId: newUser._id,
+      name: newUser.name,
+      email: newUser.email,
+      phone: newUser.phone,
+      status: 'aguardando_aprovacao',
+      treatmentType: 'Massoterapia e Estética Corporal'
+    });
+
+    console.log(`⏳ Novo cadastro pendente de aprovação pela Dra. Yasmin: ${cleanEmail}`);
 
     return res.status(201).json({
       success: true,
@@ -357,7 +422,14 @@ app.post('/api/auth/register', async (req, res) => {
         status: newUser.status,
         isApproved: newUser.isApproved
       },
-      patient: patientRecord,
+      patient: {
+        id: newPatient._id.toString(),
+        userId: newPatient.userId?.toString(),
+        name: newPatient.name,
+        email: newPatient.email,
+        phone: newPatient.phone,
+        status: newPatient.status
+      },
       isExistingPatient: false
     });
 
