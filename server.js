@@ -275,7 +275,7 @@ app.post('/api/auth/register', async (req, res) => {
     const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
     
     // Proteger contas administrativas
-    if (cleanEmail === 'dra.yasmin@clinica.com' || cleanEmail === 'admin@toquedabeleza.com') {
+    if (cleanEmail === 'yasmin@clinica.com' || cleanEmail === 'admin@toquedabeleza.com') {
       return res.status(400).json({ error: 'Este e-mail pertence à administração da clínica. Por favor, faça login.' });
     }
 
@@ -1874,14 +1874,14 @@ app.get('/api/health', (req, res) => {
 
 async function createDefaultDoctor() {
   try {
-    const doctorExists = await User.findOne({ email: 'dra.yasmin@clinica.com' });
+    const doctorExists = await User.findOne({ email: 'yasmin@clinica.com' });
     
     if (!doctorExists) {
-      const hashedPassword = await bcrypt.hash('adminPassword2026!', 10);
+      const hashedPassword = await bcrypt.hash('adm123!', 10);
       
       await User.create({
         name: 'Dra. Yasmin Oliveira',
-        email: 'dra.yasmin@clinica.com',
+        email: 'yasmin@clinica.com',
         phone: '(11) 99123-4567',
         password: hashedPassword,
         role: 'DOCTOR',
@@ -1890,7 +1890,7 @@ async function createDefaultDoctor() {
       });
       
       console.log('✅ Dra. Yasmin criada com sucesso!');
-      console.log('📧 Email: dra.yasmin@clinica.com | Senha: adminPassword2026!');
+      console.log('📧 Email: yasmin@clinica.com | Senha: adminPassword2026!');
     }
   } catch (err) {
     console.warn('Nota ao verificar usuário padrão:', err.message);
