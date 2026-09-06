@@ -1,5 +1,5 @@
 // ==============================================================================
-// SERVIDOR COMPLETO - Clínica Dra. Yasmin (CORRIGIDO)
+// SERVIDOR COMPLETO - Clínica Dra. Yasmin (CORS CORRIGIDO)
 // ==============================================================================
 
 require('dotenv').config();
@@ -15,12 +15,56 @@ const JWT_SECRET = process.env.JWT_SECRET || 'chave_secreta_dra_yasmin_super_seg
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://dev:dev123@cluster0.oflxvxo.mongodb.net/clinica_yasmin?retryWrites=true&w=majority&appName=Cluster0';
 
 // ==============================================================================
-// MIDDLEWARES
+// 🔥 MIDDLEWARES - CORS CORRIGIDO PARA GITHUB PAGES
 // ==============================================================================
+
+// Lista de origins permitidas
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://localhost:5000',
+  'http://172.30.16.1:3000',
+  'http://10.0.0.118:3000',
+  'https://lleonardomarques.github.io',
+  'https://lLeonardoMarques.github.io',
+  'https://clinica-frontend.vercel.app',
+  'https://clinica-frontend.netlify.app',
+  /\.onrender\.com$/,
+  /\.github\.io$/
+];
+
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:5173', 'http://172.30.16.1:3000', 'http://10.0.0.118:3000'],
-  credentials: true
+  origin: function (origin, callback) {
+    // Permitir requisições sem origin (como mobile apps ou curl)
+    if (!origin) return callback(null, true);
+    
+    // Verificar se a origin é permitida
+    const isAllowed = allowedOrigins.some(allowed => {
+      if (allowed instanceof RegExp) {
+        return allowed.test(origin);
+      }
+      return allowed === origin;
+    });
+    
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      console.warn('🚫 CORS bloqueado para origin:', origin);
+      callback(null, true); // Em produção, troque por: callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  credentials: true,
+  optionsSuccessStatus: 200
 }));
+
+// Log de requisições para debug
+app.use((req, res, next) => {
+  console.log(`📡 ${req.method} ${req.url} - Origin: ${req.headers.origin || 'local'}`);
+  next();
+});
+
 app.use(express.json());
 
 // ==============================================================================
@@ -155,7 +199,7 @@ function requireDoctor(req, res, next) {
 // ROTAS DE AUTENTICAÇÃO
 // ==============================================================================
 
-// 1. REGISTRO - Verifica se paciente já existe pelo email
+// 1. REGISTRO
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, phone, password, role } = req.body;
@@ -166,7 +210,6 @@ app.post('/api/auth/register', async (req, res) => {
 
     const cleanEmail = email.toLowerCase().trim();
     
-    // Verifica se usuário já existe
     const existingUser = await User.findOne({ email: cleanEmail });
     if (existingUser) {
       return res.status(400).json({ error: 'E-mail já cadastrado' });
@@ -175,10 +218,8 @@ app.post('/api/auth/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const assignedRole = role === 'DOCTOR' ? 'DOCTOR' : 'PATIENT';
 
-    // 🔍 VERIFICA SE JÁ EXISTE UM PACIENTE COM ESTE EMAIL (criado pela Dra. Yasmin)
     const existingPatient = await Patient.findOne({ email: cleanEmail });
 
-    // Cria o usuário
     const newUser = await User.create({
       name: name.trim(),
       email: cleanEmail,
@@ -193,7 +234,6 @@ app.post('/api/auth/register', async (req, res) => {
 
     if (assignedRole === 'PATIENT') {
       if (existingPatient) {
-        // ✅ PACIENTE JÁ EXISTE! Atualiza com userId e aguarda aprovação
         createdPatient = await Patient.findByIdAndUpdate(
           existingPatient._id,
           { 
@@ -206,7 +246,6 @@ app.post('/api/auth/register', async (req, res) => {
         );
         console.log(`🔗 Paciente existente vinculado ao novo usuário: ${cleanEmail}`);
       } else {
-        // 🆕 PACIENTE NÃO EXISTE - Cria novo
         createdPatient = await Patient.create({
           userId: newUser._id,
           name: newUser.name,
@@ -268,7 +307,6 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Credenciais inválidas' });
     }
 
-    // Verifica se o paciente foi aprovado
     if (user.role === 'PATIENT' && user.status !== 'approved') {
       return res.status(403).json({ 
         error: 'Aguardando aprovação da Dra. Yasmin.',
@@ -364,7 +402,7 @@ app.get('/api/patients/pending', authMiddleware, requireDoctor, async (req, res)
   }
 });
 
-// 5. APROVAR PACIENTE (CORRIGIDO)
+// 5. APROVAR PACIENTE
 app.post('/api/patients/approve/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { id } = req.params;
@@ -375,7 +413,6 @@ app.post('/api/patients/approve/:id', authMiddleware, requireDoctor, async (req,
       return res.status(400).json({ error: 'ID do paciente é obrigatório' });
     }
 
-    // Busca o paciente
     const patient = await Patient.findById(id);
     if (!patient) {
       return res.status(404).json({ error: 'Paciente não encontrado' });
@@ -383,7 +420,6 @@ app.post('/api/patients/approve/:id', authMiddleware, requireDoctor, async (req,
 
     console.log('📋 Paciente encontrado:', patient.name, patient.email);
 
-    // Busca o usuário vinculado
     if (!patient.userId) {
       return res.status(400).json({ error: 'Paciente não possui usuário vinculado' });
     }
@@ -393,13 +429,11 @@ app.post('/api/patients/approve/:id', authMiddleware, requireDoctor, async (req,
       return res.status(404).json({ error: 'Usuário não encontrado' });
     }
 
-    // Atualiza o paciente
     patient.status = 'ativo';
     patient.approvedBy = req.user.id;
     patient.approvedAt = new Date();
     await patient.save();
 
-    // Atualiza o usuário
     user.status = 'approved';
     user.isApproved = true;
     user.approvedBy = req.user.id;
@@ -486,56 +520,44 @@ app.post('/api/patients/link', authMiddleware, requireDoctor, async (req, res) =
 
     const cleanEmail = email.toLowerCase().trim();
 
-    // Busca o paciente existente (que já tem ficha)
     const existingPatient = await Patient.findOne({ 
       email: cleanEmail,
-      _id: { $ne: patientId } // Não pode ser o mesmo paciente
+      _id: { $ne: patientId }
     });
 
     if (!existingPatient) {
       return res.status(404).json({ error: 'Paciente existente não encontrado' });
     }
 
-    // Busca o usuário pendente
     const pendingUser = await User.findById(userId);
     if (!pendingUser) {
       return res.status(404).json({ error: 'Usuário não encontrado' });
     }
 
-    // Busca o paciente pendente
     const pendingPatient = await Patient.findById(patientId);
     if (!pendingPatient) {
       return res.status(404).json({ error: 'Paciente pendente não encontrado' });
     }
 
-    // =============================================
-    // VINCULAR: Usuário pendente -> Paciente existente
-    // =============================================
-
-    // 1. Atualiza o paciente existente com o userId do usuário pendente
     existingPatient.userId = pendingUser._id;
     existingPatient.status = 'ativo';
     existingPatient.approvedBy = req.user.id;
     existingPatient.approvedAt = new Date();
     await existingPatient.save();
 
-    // 2. Atualiza o usuário pendente
     pendingUser.status = 'approved';
     pendingUser.isApproved = true;
     pendingUser.approvedBy = req.user.id;
     pendingUser.approvedAt = new Date();
     await pendingUser.save();
 
-    // 3. Remove o paciente pendente (já que foi vinculado)
     await Patient.findByIdAndDelete(patientId);
 
-    // 4. Migra anamneses do paciente pendente para o existente
     await Anamnesis.updateMany(
       { patientId: patientId },
       { patientId: existingPatient._id }
     );
 
-    // 5. Migra agendamentos do paciente pendente para o existente
     await Appointment.updateMany(
       { patientId: patientId },
       { 
@@ -616,7 +638,7 @@ app.get('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
   }
 });
 
-// 9. CRIAR PACIENTE (Dra. Yasmin - já aprovado)
+// 9. CRIAR PACIENTE
 app.post('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { name, email, phone, birthDate, gender, occupation, emergencyContact, emergencyPhone, treatmentType, notes } = req.body;
@@ -693,7 +715,7 @@ app.post('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
 });
 
 // ==============================================================================
-// ROTAS DE ANAMNESE (resumidas para brevidade)
+// ROTAS DE ANAMNESE
 // ==============================================================================
 
 app.post('/api/anamnesis', authMiddleware, requireDoctor, async (req, res) => {
@@ -797,7 +819,7 @@ app.get('/api/anamnesis/patient/:patientId', authMiddleware, async (req, res) =>
 });
 
 // ==============================================================================
-// ROTAS DE AGENDAMENTO (resumidas para brevidade)
+// ROTAS DE AGENDAMENTO
 // ==============================================================================
 
 app.post('/api/appointments', authMiddleware, async (req, res) => {
@@ -932,7 +954,6 @@ app.patch('/api/appointments/:id', authMiddleware, requireDoctor, async (req, re
 // ROTAS ADICIONAIS PARA PACIENTE
 // ==============================================================================
 
-// GET /api/patients/me - Perfil do paciente logado
 app.get('/api/patients/me', authMiddleware, async (req, res) => {
   try {
     const patient = await Patient.findOne({ email: req.user.email });
@@ -965,7 +986,6 @@ app.get('/api/patients/me', authMiddleware, async (req, res) => {
   }
 });
 
-// GET /api/anamnesis/my - Anamneses do paciente logado
 app.get('/api/anamnesis/my', authMiddleware, async (req, res) => {
   try {
     const patient = await Patient.findOne({ email: req.user.email });
@@ -994,7 +1014,6 @@ app.get('/api/anamnesis/my', authMiddleware, async (req, res) => {
   }
 });
 
-// DELETE /api/patients/:id
 app.delete('/api/patients/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const patient = await Patient.findById(req.params.id);
@@ -1068,5 +1087,37 @@ app.listen(PORT, () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
   console.log(`🔗 http://localhost:${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
+  console.log('=================================================');
+  console.log('📚 ENDPOINTS DISPONÍVEIS:');
+  console.log('');
+  console.log('🔐 AUTENTICAÇÃO:');
+  console.log('  POST /api/auth/register    - Registrar (aguarda aprovação)');
+  console.log('  POST /api/auth/login       - Login');
+  console.log('  GET  /api/auth/me          - Dados do usuário logado');
+  console.log('');
+  console.log('👤 APROVAÇÃO DE PACIENTES (Dra. Yasmin):');
+  console.log('  GET  /api/patients/pending - Listar pacientes pendentes');
+  console.log('  POST /api/patients/approve/:id - Aprovar paciente');
+  console.log('  POST /api/patients/reject/:id  - Rejeitar paciente');
+  console.log('  POST /api/patients/link    - Vincular paciente existente');
+  console.log('');
+  console.log('📋 PACIENTES (Dra. Yasmin):');
+  console.log('  GET  /api/patients         - Listar pacientes');
+  console.log('  POST /api/patients         - Criar paciente (já aprovado)');
+  console.log('  GET  /api/patients/:id     - Buscar paciente');
+  console.log('  DELETE /api/patients/:id   - Deletar paciente');
+  console.log('  GET  /api/patients/me      - Perfil do paciente logado');
+  console.log('');
+  console.log('📝 ANAMNESE:');
+  console.log('  POST /api/anamnesis        - Salvar anamnese (DOCTOR)');
+  console.log('  GET  /api/anamnesis        - Listar todas anamneses (DOCTOR)');
+  console.log('  GET  /api/anamnesis/patient/:patientId - Buscar anamnese do paciente');
+  console.log('  GET  /api/anamnesis/my     - Minhas anamneses (PATIENT)');
+  console.log('');
+  console.log('📅 AGENDAMENTOS:');
+  console.log('  POST /api/appointments     - Agendar consulta');
+  console.log('  GET  /api/appointments/my  - Minhas consultas (PATIENT)');
+  console.log('  GET  /api/appointments     - Listar consultas (DOCTOR)');
+  console.log('  PATCH /api/appointments/:id - Atualizar status da consulta');
   console.log('=================================================');
 });
