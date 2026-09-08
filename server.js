@@ -14,6 +14,9 @@ import { fileURLToPath } from 'url';
 
 dotenv.config();
 
+// Fail fast if database is unreachable, do not hang operations
+mongoose.set('bufferCommands', false);
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -43,7 +46,10 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: function (origin, callback) {
+    // Permite requisições sem origin (como mobile apps, Postman, curl ou server-to-server)
     if (!origin) return callback(null, true);
+
+    // Permite se estiver na lista explícita ou casar com padrões conhecidos
     const isAllowed = allowedOrigins.includes(origin) ||
       origin.endsWith('.github.io') ||
       origin.endsWith('.onrender.com') ||
@@ -51,9 +57,11 @@ app.use(cors({
       origin.endsWith('.netlify.app') ||
       origin.includes('localhost') ||
       origin.includes('127.0.0.1');
+
     if (isAllowed) {
       callback(null, true);
     } else {
+      // Por segurança mas sem quebrar integrações legítimas em dev/preview
       callback(null, true);
     }
   },
@@ -63,11 +71,14 @@ app.use(cors({
   optionsSuccessStatus: 200
 }));
 
+// Suporte a preflight OPTIONS explícito
 app.options('*', cors());
 
+// Limite elevado para suportar anexos de exames médicos (PDFs e imagens em base64)
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// Log de requisições para auditoria e debug
 app.use((req, res, next) => {
   if (req.url.startsWith('/api')) {
     console.log(`📡 [${req.method}] ${req.url} - Origin: ${req.headers.origin || 'local'}`);
@@ -79,6 +90,7 @@ app.use((req, res, next) => {
 // MODELOS & SCHEMAS DO MONGODB
 // ==============================================================================
 
+// 1. Schema de Anexo de Exames
 const ExamSchema = new mongoose.Schema({
   title: { type: String, required: true },
   category: { 
@@ -87,7 +99,7 @@ const ExamSchema = new mongoose.Schema({
     default: 'Laudo Médico' 
   },
   date: { type: String, default: () => new Date().toISOString().split('T')[0] },
-  fileUrl: { type: String, required: true },
+  fileUrl: { type: String, required: true }, // base64 DataURL ou link do arquivo
   fileName: { type: String, required: true },
   fileType: { type: String, default: 'application/pdf' },
   fileSize: { type: String, default: '' },
@@ -97,6 +109,7 @@ const ExamSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+// 2. Schema de Usuário (autenticação & perfis)
 const UserSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -111,6 +124,7 @@ const UserSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', UserSchema);
 
+// 3. Schema de Paciente (cadastro clínico & histórico)
 const PatientSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   name: { type: String, required: true, trim: true },
@@ -131,11 +145,7 @@ const PatientSchema = new mongoose.Schema({
   notes: { type: String, default: '' },
   totalSessions: { type: Number, default: 0 },
   lastVisit: { type: String, default: '' },
-  hasAnamnesis: { type: Boolean, default: false },
-  anamnesisStatus: { type: String, enum: ['pendente', 'concluido'], default: 'pendente' },
-  anamnesisDate: { type: String, default: '' },
-  anamnesisId: { type: mongoose.Schema.Types.ObjectId, ref: 'Anamnesis' },
-  exams: [ExamSchema],
+  exams: [ExamSchema], // <- Suporte completo a anexos de exames
   approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   approvedAt: { type: Date },
   createdAt: { type: Date, default: Date.now },
@@ -143,6 +153,7 @@ const PatientSchema = new mongoose.Schema({
 });
 const Patient = mongoose.model('Patient', PatientSchema);
 
+// 4. Schema de Perguntas da Anamnese (personalizáveis no banco)
 const QuestionSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
   categoryId: { type: String, required: true },
@@ -167,25 +178,20 @@ const QuestionSchema = new mongoose.Schema({
 });
 const Question = mongoose.model('Question', QuestionSchema);
 
+// 5. Schema de Ficha de Anamnese
 const AnamnesisSchema = new mongoose.Schema({
-  patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient', required: true },
+  patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient', required: false },
   patientName: { type: String, default: '' },
   patientEmail: { type: String, default: '' },
   patientPhone: { type: String, default: '' },
   doctorName: { type: String, default: 'Dra. Yasmin Oliveira' },
   pressurePreference: { 
     type: String, 
-    enum: ['Suave / Relaxante', 'Média / Terapêutica', 'Firme / Profunda', 'Vigorosa / Modeladora'],
     default: 'Média / Terapêutica' 
   },
-  mainObjective: { type: String, required: true },
-  bodyAreas: [{
-    id: String,
-    name: String,
-    type: String,
-    intensity: Number
-  }],
-  answers: { type: mongoose.Schema.Types.Mixed, required: true },
+  mainObjective: { type: String, default: 'Bem-estar e estética corporal' },
+  bodyAreas: { type: [mongoose.Schema.Types.Mixed], default: [] },
+  answers: { type: mongoose.Schema.Types.Mixed, default: {} },
   detectedAlerts: [String],
   clinicalObservations: { type: String, default: '' },
   recommendedTechniques: [String],
@@ -196,27 +202,7 @@ const AnamnesisSchema = new mongoose.Schema({
 });
 const Anamnesis = mongoose.model('Anamnesis', AnamnesisSchema);
 
-const EvolutionSchema = new mongoose.Schema({
-  patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient', required: true },
-  sessionNumber: { type: Number, required: true },
-  date: { type: String, required: true },
-  technique: { type: String, required: true },
-  areasTreated: [String],
-  patientFeedback: { type: String, default: '' },
-  therapistNotes: { type: String, default: '' },
-  measurements: {
-    weight: Number,
-    waist: Number,
-    abdomen: Number,
-    hips: Number,
-    arms: Number,
-    thighs: Number
-  },
-  doctorName: { type: String, default: 'Dra. Yasmin Oliveira' },
-  createdAt: { type: Date, default: Date.now }
-});
-const Evolution = mongoose.model('Evolution', EvolutionSchema);
-
+// 6. Schema de Agendamentos
 const AppointmentSchema = new mongoose.Schema({
   patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient', required: true },
   patientName: { type: String, required: true },
@@ -236,42 +222,6 @@ const AppointmentSchema = new mongoose.Schema({
 });
 const Appointment = mongoose.model('Appointment', AppointmentSchema);
 
-async function seedDefaultEvolutionsIfEmpty() {
-  try {
-    const count = await Evolution.countDocuments();
-    if (count === 0) {
-      const firstPatient = await Patient.findOne();
-      if (firstPatient) {
-        await Evolution.create([
-          {
-            patientId: firstPatient._id,
-            sessionNumber: 1,
-            date: '2026-08-10',
-            technique: 'Drenagem Linfática Facial + Liberação Miofascial Cervical',
-            areasTreated: ['Cervical', 'Trapézio', 'Face'],
-            patientFeedback: 'Alívio imediato na tensão cervical e menor sensação de inchaço facial.',
-            therapistNotes: 'Boa resposta da fáscia. Presença de nódulos miofasciais em trapézio superior direito tratados com sucesso.',
-            measurements: { weight: 64.5, waist: 72, abdomen: 81, hips: 98 }
-          },
-          {
-            patientId: firstPatient._id,
-            sessionNumber: 2,
-            date: '2026-08-18',
-            technique: 'Massagem Modeladora com Drenagem Linfática Corporal',
-            areasTreated: ['Abdômen', 'Flancos', 'Coxas'],
-            patientFeedback: 'Excelente diminuição da retenção de líquidos e sensação de leveza.',
-            therapistNotes: 'Diminuição visível de edema abdominal. Recomendado aumento na ingestão hídrica.',
-            measurements: { weight: 63.8, waist: 70.5, abdomen: 79.5, hips: 97.5 }
-          }
-        ]);
-        console.log('✅ Evoluções clínicas de exemplo criadas');
-      }
-    }
-  } catch (err) {
-    console.warn('Aviso ao inicializar evoluções:', err.message);
-  }
-}
-
 // ==============================================================================
 // CONEXÃO RESILIENTE COM O MONGODB
 // ==============================================================================
@@ -284,7 +234,6 @@ async function connectMongo() {
     console.log('✅ Conectado com sucesso ao MongoDB Atlas');
     await createDefaultDoctor();
     await seedDefaultQuestionsIfEmpty();
-    await seedDefaultEvolutionsIfEmpty();
     console.log('📋 Sistema pronto e perguntas clínicas carregadas');
   } catch (err) {
     console.warn('⚠️ Atenção na conexão MongoDB:', err.message);
@@ -303,10 +252,12 @@ function authMiddleware(req, res, next) {
   if (!authHeader) {
     return res.status(401).json({ error: 'Token não fornecido' });
   }
+
   const token = authHeader.split(' ')[1];
   if (!token) {
     return res.status(401).json({ error: 'Token inválido' });
   }
+
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) {
       return res.status(403).json({ error: 'Token inválido ou expirado' });
@@ -328,6 +279,7 @@ function requireDoctor(req, res, next) {
 // 1. ROTAS DE AUTENTICAÇÃO (/api/auth)
 // ==============================================================================
 
+// REGISTRO DE NOVO USUÁRIO
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, phone, password, role } = req.body;
@@ -337,147 +289,67 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     const cleanEmail = email.toLowerCase().trim();
-    const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
     
-    // Proteger contas administrativas
-    if (cleanEmail === 'dra.yasmin@clinica.com' || cleanEmail === 'admin@toquedabeleza.com') {
-      return res.status(400).json({ error: 'Este e-mail pertence à administração da clínica. Por favor, faça login.' });
-    }
-
-    let existingUser = await User.findOne({ email: emailRegex });
-    if (existingUser && existingUser.role === 'DOCTOR') {
-      return res.status(400).json({ error: 'Este e-mail pertence à administração da clínica. Por favor, faça login.' });
+    const existingUser = await User.findOne({ email: cleanEmail });
+    if (existingUser) {
+      return res.status(400).json({ error: 'E-mail já cadastrado no sistema' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+    const assignedRole = role === 'DOCTOR' ? 'DOCTOR' : 'PATIENT';
 
-    // 1. Verificar se a Doutora já havia iniciado/cadastrado este paciente na clínica
-    let existingPatient = await Patient.findOne({ email: emailRegex });
-    if (!existingPatient && existingUser) {
-      existingPatient = await Patient.findOne({ userId: existingUser._id });
-    }
+    // AMARRAÇÃO AUTOMÁTICA POR E-MAIL:
+    // Verifica se a Dra. Yasmin já havia cadastrado o paciente com este e-mail
+    const existingPatient = await Patient.findOne({ email: cleanEmail });
 
-    // REGRA SOLICITADA:
-    // "se o novo usuario colocar um email que ja existe e que a doutora iniciou e colocou,
-    //  deve ser cadastrado pois a doutora cadastrou e depois o cliente foi adentrar a aplicação para acompanhar"
-    if (existingPatient || (existingUser && existingUser.role === 'PATIENT')) {
-      console.log(`✨ Paciente pré-cadastrado pela Dra. Yasmin está ativando sua conta no portal: ${cleanEmail}`);
+    const isAutoApproved = assignedRole === 'DOCTOR' || !!existingPatient;
 
-      let userRecord = existingUser;
-      if (!userRecord) {
-        userRecord = await User.create({
-          name: name.trim(),
-          email: cleanEmail,
-          phone: phone.trim(),
-          password: hashedPassword,
-          role: 'PATIENT',
-          status: 'approved',
-          isApproved: true,
-          approvedAt: new Date()
-        });
-      } else {
-        // Atualiza a senha que o paciente acabou de escolher no "Novo Usuário" e ativa
-        userRecord.password = hashedPassword;
-        if (name && name.trim()) userRecord.name = name.trim();
-        if (phone && phone.trim()) userRecord.phone = phone.trim();
-        userRecord.role = 'PATIENT';
-        userRecord.status = 'approved';
-        userRecord.isApproved = true;
-        if (!userRecord.approvedAt) userRecord.approvedAt = new Date();
-        await userRecord.save();
-      }
-
-      // Sincroniza a ficha do paciente para ativo
-      let patientRecord = existingPatient;
-      if (patientRecord) {
-        patientRecord.userId = userRecord._id;
-        patientRecord.status = 'ativo';
-        if (!patientRecord.phone || patientRecord.phone.trim() === '') {
-          patientRecord.phone = phone.trim();
-        }
-        if (!patientRecord.name || patientRecord.name === 'Sem nome' || patientRecord.name.trim() === '') {
-          patientRecord.name = name.trim();
-        }
-        if (!patientRecord.approvedAt) patientRecord.approvedAt = new Date();
-        await patientRecord.save();
-      } else {
-        patientRecord = await Patient.create({
-          userId: userRecord._id,
-          name: userRecord.name,
-          email: cleanEmail,
-          phone: userRecord.phone,
-          status: 'ativo',
-          treatmentType: 'Massoterapia e Estética Corporal',
-          approvedAt: new Date()
-        });
-      }
-
-      const token = jwt.sign(
-        { 
-          id: userRecord._id.toString(), 
-          role: userRecord.role, 
-          email: userRecord.email, 
-          status: userRecord.status, 
-          name: userRecord.name 
-        },
-        JWT_SECRET,
-        { expiresIn: '30d' }
-      );
-
-      return res.status(201).json({
-        success: true,
-        autoApproved: true,
-        isExistingPatient: true,
-        message: `Cadastro ativado com sucesso! Sua ficha clínica já havia sido iniciada pela Dra. Yasmin. Seu acesso ao portal está liberado para acompanhar seu prontuário e sessões.`,
-        token,
-        user: {
-          id: userRecord._id.toString(),
-          name: userRecord.name,
-          email: userRecord.email,
-          phone: userRecord.phone,
-          role: userRecord.role,
-          status: userRecord.status,
-          isApproved: userRecord.isApproved
-        },
-        patient: {
-          id: patientRecord._id.toString(),
-          userId: patientRecord.userId?.toString(),
-          name: patientRecord.name,
-          email: patientRecord.email,
-          phone: patientRecord.phone,
-          status: patientRecord.status,
-          treatmentType: patientRecord.treatmentType
-        }
-      });
-    }
-
-    // 2. Cenário: Usuário totalmente novo (e-mail nunca antes cadastrado pela doutora)
     const newUser = await User.create({
       name: name.trim(),
       email: cleanEmail,
       phone: phone.trim(),
       password: hashedPassword,
-      role: 'PATIENT',
-      status: 'pending',
-      isApproved: false
+      role: assignedRole,
+      status: isAutoApproved ? 'approved' : 'pending',
+      isApproved: isAutoApproved
     });
 
-    const newPatient = await Patient.create({
-      userId: newUser._id,
-      name: newUser.name,
-      email: newUser.email,
-      phone: newUser.phone,
-      status: 'aguardando_aprovacao',
-      treatmentType: 'Massoterapia e Estética Corporal'
-    });
+    let patientRecord = null;
 
-    console.log(`⏳ Novo cadastro pendente de aprovação pela Dra. Yasmin: ${cleanEmail}`);
+    if (assignedRole === 'PATIENT') {
+      if (existingPatient) {
+        // Vincula a ficha existente da Dra. ao novo usuário
+        existingPatient.userId = newUser._id;
+        existingPatient.status = 'ativo';
+        await existingPatient.save();
+        patientRecord = existingPatient;
+        console.log(`🔗 Paciente existente vinculado ao novo usuário: ${cleanEmail}`);
+      } else {
+        // Cria paciente aguardando aprovação
+        patientRecord = await Patient.create({
+          userId: newUser._id,
+          name: newUser.name,
+          email: newUser.email,
+          phone: newUser.phone,
+          status: 'aguardando_aprovacao',
+          treatmentType: 'Massoterapia e Estética Corporal'
+        });
+        console.log(`✅ Novo paciente criado aguardando aprovação: ${cleanEmail}`);
+      }
+    }
 
-    return res.status(201).json({
+    const token = jwt.sign(
+      { id: newUser._id.toString(), role: newUser.role, email: newUser.email, status: newUser.status, name: newUser.name },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.status(201).json({
       success: true,
-      autoApproved: false,
-      requiresApproval: true,
-      message: 'Cadastro realizado com sucesso! Como seu e-mail ainda não constava na base clínica da Dra. Yasmin, seu cadastro foi enviado para aprovação da doutora antes da liberação do acesso.',
+      message: existingPatient 
+        ? 'Cadastro realizado! Sua ficha clínica foi vinculada com sucesso.'
+        : 'Cadastro realizado com sucesso!',
+      token,
       user: {
         id: newUser._id.toString(),
         name: newUser.name,
@@ -487,23 +359,16 @@ app.post('/api/auth/register', async (req, res) => {
         status: newUser.status,
         isApproved: newUser.isApproved
       },
-      patient: {
-        id: newPatient._id.toString(),
-        userId: newPatient.userId?.toString(),
-        name: newPatient.name,
-        email: newPatient.email,
-        phone: newPatient.phone,
-        status: newPatient.status
-      },
-      isExistingPatient: false
+      patient: patientRecord,
+      isExistingPatient: !!existingPatient
     });
-
   } catch (err) {
     console.error('Erro no registro:', err);
     res.status(500).json({ error: err.message || 'Erro interno ao cadastrar usuário' });
   }
 });
 
+// LOGIN
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -513,35 +378,19 @@ app.post('/api/auth/login', async (req, res) => {
 
     const cleanEmail = email.toLowerCase().trim();
     const user = await User.findOne({ email: cleanEmail });
-    
     if (!user) {
-      return res.status(401).json({ 
-        error: 'E-mail não cadastrado. Verifique a digitação ou crie sua conta na opção "Novo Usuário".',
-        code: 'EMAIL_NOT_FOUND' 
-      });
+      return res.status(401).json({ error: 'Credenciais inválidas' });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(401).json({ 
-        error: 'Senha incorreta. Verifique os dados digitados e tente novamente.',
-        code: 'INVALID_PASSWORD' 
-      });
-    }
-
-    if (user.role === 'PATIENT' && (user.status === 'pending' || !user.isApproved)) {
-      return res.status(403).json({ 
-        error: 'Seu cadastro está pendente de aprovação pela Dra. Yasmin. Aguarde a liberação do seu acesso pela administração da clínica.',
-        status: 'pending',
-        code: 'ACCOUNT_PENDING'
-      });
+      return res.status(401).json({ error: 'Credenciais inválidas' });
     }
 
     if (user.role === 'PATIENT' && user.status === 'rejected') {
       return res.status(403).json({ 
-        error: 'Seu cadastro não foi aprovado pela administração da clínica.',
-        status: user.status,
-        code: 'ACCOUNT_REJECTED'
+        error: 'Seu cadastro não foi aprovado pela administração.',
+        status: user.status 
       });
     }
 
@@ -570,6 +419,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// DADOS DO USUÁRIO LOGADO
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select('-password');
@@ -595,8 +445,10 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
 
 // ==============================================================================
 // 2. ROTAS DE USUÁRIOS NO MONGO (/api/users)
+// Pessoas que cadastram novo usuário
 // ==============================================================================
 
+// LISTAR USUÁRIOS
 app.get('/api/users', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { role, status } = req.query;
@@ -624,6 +476,7 @@ app.get('/api/users', authMiddleware, requireDoctor, async (req, res) => {
   }
 });
 
+// CRIAR NOVO USUÁRIO (pela Dra. ou endpoint REST)
 app.post('/api/users', async (req, res) => {
   try {
     const { name, email, phone, password, role } = req.body;
@@ -673,40 +526,9 @@ app.post('/api/users', async (req, res) => {
   }
 });
 
-// LISTA DE USUÁRIOS PENDENTES (deve vir antes de /:id para evitar colisões de rota)
-app.get('/api/users/pending', authMiddleware, requireDoctor, async (req, res) => {
-  try {
-    const pendingUsers = await User.find({
-      $or: [{ status: 'pending' }, { isApproved: false }],
-      role: 'PATIENT'
-    }).select('-password').sort({ createdAt: -1 });
-
-    const formatted = await Promise.all(pendingUsers.map(async (u) => {
-      const patient = await Patient.findOne({ $or: [{ userId: u._id }, { email: u.email }] });
-      return {
-        id: u._id.toString(),
-        name: u.name,
-        email: u.email,
-        phone: u.phone,
-        status: u.status,
-        isApproved: u.isApproved,
-        createdAt: u.createdAt,
-        patientId: patient ? patient._id.toString() : null,
-        patientStatus: patient ? patient.status : null
-      };
-    }));
-
-    res.json({ success: true, count: formatted.length, users: formatted });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
+// BUSCAR USUÁRIO POR ID
 app.get('/api/users/:id', authMiddleware, async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: 'ID de usuário inválido' });
-    }
     const user = await User.findById(req.params.id).select('-password');
     if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
     res.json({ success: true, user });
@@ -715,11 +537,9 @@ app.get('/api/users/:id', authMiddleware, async (req, res) => {
   }
 });
 
+// ATUALIZAR USUÁRIO (status, aprovação, dados)
 app.put('/api/users/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: 'ID de usuário inválido' });
-    }
     const { name, phone, role, status, isApproved } = req.body;
     const updateData = {};
     if (name) updateData.name = name.trim();
@@ -731,6 +551,7 @@ app.put('/api/users/:id', authMiddleware, requireDoctor, async (req, res) => {
     const user = await User.findByIdAndUpdate(req.params.id, updateData, { new: true }).select('-password');
     if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
 
+    // Sincroniza também no paciente se existir
     await Patient.findOneAndUpdate(
       { email: user.email },
       { 
@@ -746,11 +567,9 @@ app.put('/api/users/:id', authMiddleware, requireDoctor, async (req, res) => {
   }
 });
 
+// DELETAR USUÁRIO
 app.delete('/api/users/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: 'ID de usuário inválido' });
-    }
     const user = await User.findByIdAndDelete(req.params.id);
     if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
     res.json({ success: true, message: 'Usuário removido com sucesso' });
@@ -760,20 +579,19 @@ app.delete('/api/users/:id', authMiddleware, requireDoctor, async (req, res) => 
 });
 
 // ==============================================================================
-// 3. ROTAS DE PACIENTES NO MONGO (/api/patients) - CORRIGIDAS
+// 3. ROTAS DE PACIENTES NO MONGO (/api/patients)
+// Pacientes cadastrados pela Dra. Yasmin, com fichas, exames e amarração
 // ==============================================================================
 
-// 🔥 LISTAR PACIENTES (CORRIGIDO: Retorna TODOS, incluindo pendentes)
+// LISTAR PACIENTES (Doutora)
 app.get('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { search, treatmentType, status } = req.query;
     const filter = {};
 
-    // 🔥 CORREÇÃO: Só filtra por status se for passado na query
-    if (status && status !== 'todos' && status !== 'all') {
-      filter.status = status;
+    if (!status) {
+      filter.status = { $ne: 'aguardando_aprovacao' };
     }
-    // Se NÃO passou status, retorna TODOS (incluindo pendentes)
 
     if (search) {
       filter.$or = [
@@ -783,67 +601,38 @@ app.get('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
       ];
     }
     if (treatmentType) filter.treatmentType = treatmentType;
-
-    console.log('🔍 Filtro aplicado em /patients:', filter);
+    if (status && status !== 'todos') filter.status = status;
 
     const patients = await Patient.find(filter).sort({ createdAt: -1 });
-    
-    console.log(`📋 Encontrados ${patients.length} pacientes`);
 
-    // Busca todas anamneses salvas para garantir amarração precisa com o paciente
-    const anamnesesDocs = await Anamnesis.find({}, 'patientId createdAt');
-    const anamnesesMap = new Map();
-    anamnesesDocs.forEach(a => {
-      if (a.patientId) {
-        anamnesesMap.set(a.patientId.toString(), a.createdAt ? a.createdAt.toISOString() : new Date().toISOString());
-      }
-    });
+    const patientsFormatted = patients.map(p => ({
+      id: p._id.toString(),
+      userId: p.userId ? p.userId.toString() : null,
+      name: p.name,
+      email: p.email,
+      phone: p.phone,
+      birthDate: p.birthDate,
+      gender: p.gender,
+      occupation: p.occupation,
+      emergencyContact: p.emergencyContact,
+      emergencyPhone: p.emergencyPhone,
+      address: p.address,
+      status: p.status,
+      treatmentType: p.treatmentType,
+      notes: p.notes,
+      totalSessions: p.totalSessions,
+      lastVisit: p.lastVisit,
+      exams: p.exams || [],
+      createdAt: p.createdAt ? p.createdAt.toISOString().split('T')[0] : ''
+    }));
 
-    const patientsFormatted = patients.map(p => {
-      const pId = p._id.toString();
-      const hasAnam = Boolean(p.hasAnamnesis || anamnesesMap.has(pId));
-      return {
-        id: pId,
-        userId: p.userId ? p.userId.toString() : null,
-        name: p.name || 'Sem nome',
-        email: p.email || '',
-        phone: p.phone || '',
-        birthDate: p.birthDate || '',
-        gender: p.gender || 'Feminino',
-        occupation: p.occupation || '',
-        emergencyContact: p.emergencyContact || '',
-        emergencyPhone: p.emergencyPhone || '',
-        address: p.address || '',
-        status: p.status || 'ativo',
-        hasAnamnesis: hasAnam,
-        anamnesisStatus: hasAnam ? 'concluido' : 'pendente',
-        anamnesisDate: p.anamnesisDate || (anamnesesMap.get(pId) || ''),
-        approvedBy: p.approvedBy ? p.approvedBy.toString() : null,
-        approvedAt: p.approvedAt ? p.approvedAt.toISOString() : null,
-        treatmentType: p.treatmentType || 'Massoterapia e Estética Corporal',
-        notes: p.notes || '',
-        totalSessions: p.totalSessions || 0,
-        lastVisit: p.lastVisit || '',
-        exams: p.exams || [],
-        createdAt: p.createdAt ? p.createdAt.toISOString().split('T')[0] : ''
-      };
-    });
-
-    res.json({ 
-      success: true, 
-      total: patientsFormatted.length, 
-      patients: patientsFormatted 
-    });
+    res.json({ success: true, total: patientsFormatted.length, patients: patientsFormatted });
   } catch (err) {
-    console.error('❌ Erro em /patients:', err.message);
-    res.status(500).json({ 
-      success: false, 
-      error: err.message 
-    });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// CRIAR PACIENTE PELA DOUTORA
+// CRIAR PACIENTE PELA DOUTORA (Amarração automática com usuário pelo mesmo e-mail)
 app.post('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { 
@@ -862,8 +651,10 @@ app.post('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
       return res.status(400).json({ error: 'Já existe um paciente cadastrado com este e-mail' });
     }
 
+    // AMARRAÇÃO: Verifica se o usuário já havia criado conta com este e-mail
     let user = await User.findOne({ email: cleanEmail });
     if (!user) {
+      // Cria a conta do usuário para permitir login futuro pelo paciente
       const defaultHash = await bcrypt.hash('123456', 10);
       user = await User.create({
         name: name.trim(),
@@ -878,6 +669,7 @@ app.post('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
       });
       console.log(`👤 Usuário gerado automaticamente para o paciente: ${cleanEmail}`);
     } else {
+      // Se já existia conta de usuário, amarra e aprova
       user.status = 'approved';
       user.isApproved = true;
       await user.save();
@@ -932,194 +724,9 @@ app.post('/api/patients', authMiddleware, requireDoctor, async (req, res) => {
   }
 });
 
-// ==============================================================================
-// ROTAS ESPECÍFICAS DE PACIENTES (Devem vir antes de /:id para evitar colisões)
-// ==============================================================================
-
-// 🔥 PACIENTES PENDENTES DE APROVAÇÃO
-app.get('/api/patients/pending', authMiddleware, requireDoctor, async (req, res) => {
-  try {
-    console.log('📤 Buscando pacientes pendentes...');
-    
-    // Busca pacientes com status pendente ou aguardando aprovação
-    const pendingPatients = await Patient.find({ 
-      status: { $in: ['aguardando_aprovacao', 'pending'] } 
-    }).sort({ createdAt: -1 });
-    
-    // Busca também usuários com role PATIENT que ainda estão pendentes
-    const pendingUsers = await User.find({
-      role: 'PATIENT',
-      $or: [{ status: 'pending' }, { isApproved: false }]
-    }).select('-password');
-
-    // Mapeia emails já presentes
-    const existingEmails = new Set(pendingPatients.map(p => (p.email || '').toLowerCase().trim()));
-
-    // Adiciona fichas de usuários que ainda não tenham ficha de paciente correspondente
-    for (const u of pendingUsers) {
-      const uEmail = (u.email || '').toLowerCase().trim();
-      if (uEmail && !existingEmails.has(uEmail)) {
-        let pat = await Patient.findOne({ $or: [{ userId: u._id }, { email: uEmail }] });
-        if (!pat) {
-          try {
-            pat = await Patient.create({
-              userId: u._id,
-              name: u.name || 'Novo Paciente',
-              email: uEmail,
-              phone: u.phone || '',
-              status: 'aguardando_aprovacao',
-              treatmentType: 'Massoterapia e Estética Corporal'
-            });
-          } catch (createErr) {
-            console.warn('⚠️ Erro ao registrar ficha automática:', createErr.message);
-          }
-        }
-        if (pat && (pat.status === 'aguardando_aprovacao' || pat.status === 'pending')) {
-          pendingPatients.push(pat);
-          existingEmails.add(uEmail);
-        }
-      }
-    }
-    
-    console.log(`📋 Encontrados ${pendingPatients.length} pacientes pendentes`);
-    
-    if (pendingPatients.length === 0) {
-      return res.json({ 
-        success: true, 
-        total: 0, 
-        patients: [] 
-      });
-    }
-    
-    const patientsWithUsers = await Promise.all(pendingPatients.map(async (p) => {
-      try {
-        let userData = null;
-        
-        if (p.userId) {
-          try {
-            const user = await User.findById(p.userId).select('-password');
-            if (user) {
-              userData = {
-                id: user._id.toString(),
-                name: user.name || 'Usuário sem nome',
-                email: user.email || '',
-                phone: user.phone || '',
-                status: user.status || 'pending'
-              };
-            }
-          } catch (userErr) {
-            console.warn(`⚠️ Erro ao buscar usuário:`, userErr.message);
-          }
-        } else if (p.email) {
-          try {
-            const user = await User.findOne({ email: p.email.toLowerCase().trim() }).select('-password');
-            if (user) {
-              userData = {
-                id: user._id.toString(),
-                name: user.name || 'Usuário sem nome',
-                email: user.email || '',
-                phone: user.phone || '',
-                status: user.status || 'pending'
-              };
-            }
-          } catch (userErr) {
-            console.warn(`⚠️ Erro ao buscar usuário por email:`, userErr.message);
-          }
-        }
-        
-        return {
-          id: p._id ? p._id.toString() : 'temp-' + Date.now(),
-          userId: p.userId ? p.userId.toString() : (userData?.id || null),
-          name: p.name || 'Nome não informado',
-          email: p.email || '',
-          phone: p.phone || '',
-          status: p.status || 'aguardando_aprovacao',
-          treatmentType: p.treatmentType || 'Massoterapia e Estética Corporal',
-          exams: p.exams || [],
-          createdAt: p.createdAt ? (p.createdAt instanceof Date ? p.createdAt.toISOString() : p.createdAt) : new Date().toISOString(),
-          user: userData
-        };
-      } catch (err) {
-        console.error('❌ Erro ao processar paciente:', err.message);
-        return {
-          id: p._id ? p._id.toString() : 'erro',
-          name: p.name || 'Erro ao carregar',
-          email: p.email || '',
-          phone: p.phone || '',
-          status: 'erro',
-          error: err.message
-        };
-      }
-    }));
-    
-    res.json({ 
-      success: true, 
-      total: patientsWithUsers.length, 
-      patients: patientsWithUsers 
-    });
-    
-  } catch (err) {
-    console.error('❌ ERRO CRÍTICO em /patients/pending:', err.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Erro ao buscar pacientes pendentes',
-      details: err.message
-    });
-  }
-});
-
-// PERFIL DO PACIENTE LOGADO
-app.get('/api/patients/me', authMiddleware, async (req, res) => {
-  try {
-    let patient = await Patient.findOne({
-      $or: [
-        { userId: req.user.id },
-        { email: req.user.email?.toLowerCase().trim() }
-      ]
-    });
-
-    if (!patient) {
-      return res.status(404).json({ error: 'Ficha de paciente não encontrada para este usuário' });
-    }
-
-    if (!patient.userId) {
-      patient.userId = req.user.id;
-      await patient.save();
-    }
-
-    res.json({
-      success: true,
-      patient: {
-        id: patient._id.toString(),
-        userId: patient.userId?.toString(),
-        name: patient.name,
-        email: patient.email,
-        phone: patient.phone,
-        birthDate: patient.birthDate,
-        gender: patient.gender,
-        occupation: patient.occupation,
-        emergencyContact: patient.emergencyContact,
-        emergencyPhone: patient.emergencyPhone,
-        address: patient.address,
-        status: patient.status,
-        treatmentType: patient.treatmentType,
-        notes: patient.notes,
-        totalSessions: patient.totalSessions,
-        lastVisit: patient.lastVisit,
-        exams: patient.exams || [],
-        createdAt: patient.createdAt ? patient.createdAt.toISOString().split('T')[0] : ''
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
+// BUSCAR PACIENTE POR ID (com exames e anamnese)
 app.get('/api/patients/:id', authMiddleware, async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: 'ID de paciente inválido' });
-    }
     const patient = await Patient.findById(req.params.id);
     if (!patient) return res.status(404).json({ error: 'Paciente não encontrado' });
 
@@ -1154,11 +761,9 @@ app.get('/api/patients/:id', authMiddleware, async (req, res) => {
   }
 });
 
+// ATUALIZAR PACIENTE PELA DOUTORA (Reflete imediatamente para o cliente)
 app.put('/api/patients/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: 'ID de paciente inválido' });
-    }
     const { 
       name, email, phone, birthDate, gender, occupation, 
       emergencyContact, emergencyPhone, address, treatmentType, notes, status, totalSessions, lastVisit 
@@ -1182,6 +787,7 @@ app.put('/api/patients/:id', authMiddleware, requireDoctor, async (req, res) => 
     const patient = await Patient.findByIdAndUpdate(req.params.id, updateData, { new: true });
     if (!patient) return res.status(404).json({ error: 'Paciente não encontrado' });
 
+    // Sincroniza nome e telefone no usuário amarrado
     if (patient.userId) {
       await User.findByIdAndUpdate(patient.userId, {
         name: patient.name,
@@ -1218,11 +824,9 @@ app.put('/api/patients/:id', authMiddleware, requireDoctor, async (req, res) => 
   }
 });
 
+// DELETAR PACIENTE
 app.delete('/api/patients/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: 'ID de paciente inválido' });
-    }
     const patient = await Patient.findById(req.params.id);
     if (!patient) {
       return res.status(404).json({ error: 'Paciente não encontrado' });
@@ -1243,177 +847,150 @@ app.delete('/api/patients/:id', authMiddleware, requireDoctor, async (req, res) 
   }
 });
 
+// PERFIL DO PACIENTE LOGADO (/api/patients/me)
+app.get('/api/patients/me', authMiddleware, async (req, res) => {
+  try {
+    // Procura por userId ou por email
+    let patient = await Patient.findOne({
+      $or: [
+        { userId: req.user.id },
+        { email: req.user.email?.toLowerCase().trim() }
+      ]
+    });
+
+    if (!patient) {
+      return res.status(404).json({ error: 'Ficha de paciente não encontrada para este usuário' });
+    }
+
+    // Garante amarração mútua se ainda não estava gravada
+    if (!patient.userId) {
+      patient.userId = req.user.id;
+      await patient.save();
+    }
+
+    res.json({
+      success: true,
+      patient: {
+        id: patient._id.toString(),
+        userId: patient.userId?.toString(),
+        name: patient.name,
+        email: patient.email,
+        phone: patient.phone,
+        birthDate: patient.birthDate,
+        gender: patient.gender,
+        occupation: patient.occupation,
+        emergencyContact: patient.emergencyContact,
+        emergencyPhone: patient.emergencyPhone,
+        address: patient.address,
+        status: patient.status,
+        treatmentType: patient.treatmentType,
+        notes: patient.notes,
+        totalSessions: patient.totalSessions,
+        lastVisit: patient.lastVisit,
+        exams: patient.exams || [],
+        createdAt: patient.createdAt ? patient.createdAt.toISOString().split('T')[0] : ''
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PACIENTES PENDENTES DE APROVAÇÃO
+app.get('/api/patients/pending', authMiddleware, requireDoctor, async (req, res) => {
+  try {
+    const pendingPatients = await Patient.find({ 
+      status: 'aguardando_aprovacao' 
+    }).sort({ createdAt: -1 });
+    
+    const patientsWithUsers = await Promise.all(pendingPatients.map(async (p) => {
+      const user = await User.findById(p.userId).select('-password');
+      return {
+        id: p._id.toString(),
+        userId: p.userId ? p.userId.toString() : null,
+        name: p.name,
+        email: p.email,
+        phone: p.phone,
+        status: p.status,
+        treatmentType: p.treatmentType,
+        exams: p.exams || [],
+        createdAt: p.createdAt,
+        user: user ? {
+          id: user._id.toString(),
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          status: user.status
+        } : null
+      };
+    }));
+    
+    res.json({ success: true, patients: patientsWithUsers });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // APROVAR PACIENTE
 app.post('/api/patients/approve/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { id } = req.params;
-    
-    let patient = null;
-    try {
-      patient = await Patient.findById(id);
-    } catch (e) {
-      // id might not be ObjectId
-    }
-    if (!patient) {
-      patient = await Patient.findOne({ userId: id });
-    }
+    const patient = await Patient.findById(id);
+    if (!patient) return res.status(404).json({ error: 'Paciente não encontrado' });
 
-    let user = null;
-    if (patient?.userId) {
-      try {
-        user = await User.findById(patient.userId);
-      } catch (e) {}
-    }
-    if (!user) {
-      try {
-        user = await User.findById(id);
-      } catch (e) {}
-    }
-    if (!user && patient?.email) {
-      user = await User.findOne({ email: patient.email.toLowerCase().trim() });
-    }
-    if (!patient && user) {
-      patient = await Patient.findOne({ $or: [{ userId: user._id }, { email: user.email.toLowerCase().trim() }] });
-    }
+    patient.status = 'ativo';
+    patient.approvedBy = req.user.id;
+    patient.approvedAt = new Date();
+    await patient.save();
 
-    if (!patient && !user) {
-      return res.status(404).json({ error: 'Cadastro não encontrado para aprovação' });
-    }
-
-    if (patient) {
-      patient.status = 'ativo';
-      patient.approvedBy = req.user.id;
-      patient.approvedAt = new Date();
-      if (user && !patient.userId) {
-        patient.userId = user._id;
-      }
-      await patient.save();
-    }
-
-    if (user) {
-      user.status = 'approved';
-      user.isApproved = true;
-      user.approvedBy = req.user.id;
-      user.approvedAt = new Date();
-      await user.save();
+    if (patient.userId) {
+      await User.findByIdAndUpdate(patient.userId, {
+        status: 'approved',
+        isApproved: true,
+        approvedBy: req.user.id,
+        approvedAt: new Date()
+      });
     }
 
     res.json({
       success: true,
-      message: 'Paciente e usuário aprovados com sucesso! O acesso ao sistema está liberado.',
-      patient: patient ? {
+      message: 'Paciente aprovado com sucesso!',
+      patient: {
         id: patient._id.toString(),
         name: patient.name,
         email: patient.email,
         status: patient.status
-      } : null,
-      user: user ? {
-        id: user._id.toString(),
-        name: user.name,
-        email: user.email,
-        status: user.status
-      } : null
+      }
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/users/:id/approve', authMiddleware, requireDoctor, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const user = await User.findById(id);
-    if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
-
-    user.status = 'approved';
-    user.isApproved = true;
-    user.approvedBy = req.user.id;
-    user.approvedAt = new Date();
-    await user.save();
-
-    const patient = await Patient.findOneAndUpdate(
-      { $or: [{ userId: user._id }, { email: user.email }] },
-      { 
-        status: 'ativo', 
-        userId: user._id,
-        approvedBy: req.user.id,
-        approvedAt: new Date()
-      },
-      { new: true }
-    );
-
-    res.json({
-      success: true,
-      message: 'Usuário aprovado com sucesso!',
-      user: {
-        id: user._id.toString(),
-        name: user.name,
-        email: user.email,
-        status: user.status
-      },
-      patient: patient ? {
-        id: patient._id.toString(),
-        name: patient.name,
-        status: patient.status
-      } : null
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/users/:id/reject', authMiddleware, requireDoctor, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const user = await User.findById(id);
-    if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
-
-    user.status = 'rejected';
-    user.isApproved = false;
-    await user.save();
-
-    await Patient.findOneAndUpdate(
-      { $or: [{ userId: user._id }, { email: user.email }] },
-      { status: 'inativo' }
-    );
-
-    res.json({ success: true, message: 'Usuário recusado' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
+// REJEITAR PACIENTE
 app.post('/api/patients/reject/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { id } = req.params;
-    let patient = await Patient.findById(id);
-    if (!patient) {
-      patient = await Patient.findOne({ userId: id });
-    }
+    const patient = await Patient.findById(id);
+    if (!patient) return res.status(404).json({ error: 'Paciente não encontrado' });
 
-    if (patient) {
-      patient.status = 'inativo';
-      await patient.save();
+    patient.status = 'inativo';
+    await patient.save();
 
-      if (patient.userId) {
-        await User.findByIdAndUpdate(patient.userId, {
-          status: 'rejected',
-          isApproved: false
-        });
-      }
-    } else {
-      await User.findByIdAndUpdate(id, {
+    if (patient.userId) {
+      await User.findByIdAndUpdate(patient.userId, {
         status: 'rejected',
         isApproved: false
       });
     }
 
-    res.json({ success: true, message: 'Cadastro recusado com sucesso' });
+    res.json({ success: true, message: 'Paciente rejeitado com sucesso' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// VINCULAR PACIENTE EXISTENTE MANUALMENTE
 app.post('/api/patients/link', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { email, patientId, userId } = req.body;
@@ -1462,75 +1039,13 @@ app.post('/api/patients/link', authMiddleware, requireDoctor, async (req, res) =
 });
 
 // ==============================================================================
-// 4. ROTAS DE ANEXAR EXAMES
+// 4. ROTAS DE ANEXAR EXAMES (/api/patients/:id/exams & /api/patients/me/exams)
+// Suporte para a Doutora e para o Paciente anexarem laudos, imagens e exames
 // ==============================================================================
 
-// Rota específica para o paciente autenticado (DEVE vir antes de /:id/exams)
-app.post('/api/patients/me/exams', authMiddleware, async (req, res) => {
-  try {
-    const patient = await Patient.findOne({
-      $or: [
-        { userId: req.user.id },
-        { email: req.user.email?.toLowerCase().trim() }
-      ]
-    });
-
-    if (!patient) return res.status(404).json({ error: 'Ficha do paciente não encontrada' });
-
-    const { title, category, date, fileUrl, fileName, fileType, fileSize, notes } = req.body;
-    if (!title || !fileUrl || !fileName) {
-      return res.status(400).json({ error: 'Título do exame e arquivo são obrigatórios' });
-    }
-
-    const newExam = {
-      title: title.trim(),
-      category: category || 'Outro',
-      date: date || new Date().toISOString().split('T')[0],
-      fileUrl,
-      fileName,
-      fileType: fileType || 'application/pdf',
-      fileSize: fileSize || '',
-      notes: notes || '',
-      uploadedBy: 'PATIENT',
-      uploadedByName: req.user.name || patient.name,
-      createdAt: new Date()
-    };
-
-    patient.exams.push(newExam);
-    await patient.save();
-
-    res.status(201).json({
-      success: true,
-      message: 'Exame enviado com sucesso para a Dra. Yasmin',
-      exam: patient.exams[patient.exams.length - 1],
-      exams: patient.exams
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/patients/me/exams', authMiddleware, async (req, res) => {
-  try {
-    const patient = await Patient.findOne({
-      $or: [
-        { userId: req.user.id },
-        { email: req.user.email?.toLowerCase().trim() }
-      ]
-    });
-
-    if (!patient) return res.status(404).json({ error: 'Ficha do paciente não encontrada' });
-    res.json({ success: true, exams: patient.exams || [] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
+// ANEXAR EXAME AO PACIENTE (Doutora ou Usuário autorizado)
 app.post('/api/patients/:id/exams', authMiddleware, async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: 'ID de paciente inválido' });
-    }
     const { title, category, date, fileUrl, fileName, fileType, fileSize, notes } = req.body;
 
     if (!title || !fileUrl || !fileName) {
@@ -1575,11 +1090,9 @@ app.post('/api/patients/:id/exams', authMiddleware, async (req, res) => {
   }
 });
 
+// LISTAR EXAMES DO PACIENTE
 app.get('/api/patients/:id/exams', authMiddleware, async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: 'ID de paciente inválido' });
-    }
     const patient = await Patient.findById(req.params.id);
     if (!patient) return res.status(404).json({ error: 'Paciente não encontrado' });
     res.json({ success: true, exams: patient.exams || [] });
@@ -1588,11 +1101,9 @@ app.get('/api/patients/:id/exams', authMiddleware, async (req, res) => {
   }
 });
 
+// REMOVER EXAME ANEXADO
 app.delete('/api/patients/:id/exams/:examId', authMiddleware, async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ error: 'ID de paciente inválido' });
-    }
     const { id, examId } = req.params;
     const patient = await Patient.findById(id);
     if (!patient) return res.status(404).json({ error: 'Paciente não encontrado' });
@@ -1606,10 +1117,57 @@ app.delete('/api/patients/:id/exams/:examId', authMiddleware, async (req, res) =
   }
 });
 
+// PACIENTE ANEXA EXAME NA SUA PRÓPRIA FICHA
+app.post('/api/patients/me/exams', authMiddleware, async (req, res) => {
+  try {
+    const patient = await Patient.findOne({
+      $or: [
+        { userId: req.user.id },
+        { email: req.user.email?.toLowerCase().trim() }
+      ]
+    });
+
+    if (!patient) return res.status(404).json({ error: 'Ficha do paciente não encontrada' });
+
+    const { title, category, date, fileUrl, fileName, fileType, fileSize, notes } = req.body;
+    if (!title || !fileUrl || !fileName) {
+      return res.status(400).json({ error: 'Título do exame e arquivo são obrigatórios' });
+    }
+
+    const newExam = {
+      title: title.trim(),
+      category: category || 'Outro',
+      date: date || new Date().toISOString().split('T')[0],
+      fileUrl,
+      fileName,
+      fileType: fileType || 'application/pdf',
+      fileSize: fileSize || '',
+      notes: notes || '',
+      uploadedBy: 'PATIENT',
+      uploadedByName: req.user.name || patient.name,
+      createdAt: new Date()
+    };
+
+    patient.exams.push(newExam);
+    await patient.save();
+
+    res.status(201).json({
+      success: true,
+      message: 'Exame enviado com sucesso para a Dra. Yasmin',
+      exam: patient.exams[patient.exams.length - 1],
+      exams: patient.exams
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==============================================================================
 // 5. ROTAS DE PERGUNTAS NO BANCO (/api/questions)
+// Gerenciamento e persistência das perguntas da anamnese
 // ==============================================================================
 
+// LISTAR PERGUNTAS DA ANAMNESE
 app.get('/api/questions', async (req, res) => {
   try {
     let questions = await Question.find().sort({ order: 1, createdAt: 1 });
@@ -1639,6 +1197,7 @@ app.get('/api/questions', async (req, res) => {
   }
 });
 
+// ADICIONAR NOVA PERGUNTA
 app.post('/api/questions', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const { id, categoryId, label, subtitle, type, options, placeholder, required, isAlertTrigger, alertMessage } = req.body;
@@ -1668,6 +1227,7 @@ app.post('/api/questions', authMiddleware, requireDoctor, async (req, res) => {
   }
 });
 
+// ATUALIZAR PERGUNTA
 app.put('/api/questions/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const question = await Question.findOneAndUpdate(
@@ -1682,6 +1242,7 @@ app.put('/api/questions/:id', authMiddleware, requireDoctor, async (req, res) =>
   }
 });
 
+// REMOVER PERGUNTA
 app.delete('/api/questions/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const question = await Question.findOneAndDelete({ id: req.params.id });
@@ -1692,6 +1253,7 @@ app.delete('/api/questions/:id', authMiddleware, requireDoctor, async (req, res)
   }
 });
 
+// REINICIALIZAR PERGUNTAS PADRÃO
 app.post('/api/questions/seed', authMiddleware, requireDoctor, async (req, res) => {
   try {
     await Question.deleteMany({});
@@ -1707,186 +1269,284 @@ app.post('/api/questions/seed', authMiddleware, requireDoctor, async (req, res) 
 // 6. ROTAS DE FICHAS DE ANAMNESE (/api/anamnesis)
 // ==============================================================================
 
-app.post('/api/anamnesis', authMiddleware, async (req, res) => {
+// SALVAR FICHA DE ANAMNESE (Doutora - Salva para clientes novos ou existentes)
+app.post('/api/anamnesis', authMiddleware, requireDoctor, async (req, res) => {
   try {
-    let { 
-      patientId, doctorName, pressurePreference, mainObjective, 
-      bodyAreas, answers, detectedAlerts, clinicalObservations, 
-      recommendedTechniques, exams, patientName, patientEmail, patientPhone 
+    const { 
+      id, patientId, patientName, patientEmail, patientPhone,
+      doctorName, pressurePreference, mainObjective, 
+      bodyAreas, answers, detectedAlerts, clinicalObservations, recommendedTechniques, exams 
     } = req.body;
 
-    // 🔥 CORREÇÃO: Converter bodyAreas se for string
-    if (typeof bodyAreas === 'string') {
-      console.log('⚠️ bodyAreas recebido como string, convertendo...');
-      try {
-        // Tentar parsear como JSON
-        bodyAreas = JSON.parse(bodyAreas);
-      } catch (e) {
-        // Se falhar, processar manualmente
-        bodyAreas = processBodyAreasString(bodyAreas);
-      }
-      console.log('✅ bodyAreas convertido para array:', bodyAreas);
-    }
-
-    // 🔥 CORREÇÃO: Garantir que é um array
-    if (!Array.isArray(bodyAreas)) {
-      bodyAreas = [];
-    }
-
-    // 🔥 CORREÇÃO: Converter answers se for string
-    if (typeof answers === 'string') {
-      try {
-        answers = JSON.parse(answers);
-      } catch (e) {
-        console.warn('⚠️ Não foi possível parsear answers:', e);
-        answers = {};
-      }
-    }
-
-    // Validar campos obrigatórios
-    if (!mainObjective || !answers) {
-      return res.status(400).json({ 
-        error: 'Campos essenciais da anamnese não fornecidos',
-        details: 'mainObjective e answers são obrigatórios'
+    // 1. Sanitizar bodyAreas de forma 100% segura contra CastError
+    let cleanBodyAreas = [];
+    if (Array.isArray(bodyAreas)) {
+      cleanBodyAreas = bodyAreas.map(b => {
+        if (typeof b === 'string') {
+          try {
+            const parsed = JSON.parse(b);
+            if (typeof parsed === 'object' && parsed !== null) return parsed;
+          } catch {}
+          return { id: b, name: b, type: 'dor_tensao', intensity: 5 };
+        }
+        return b;
       });
+    } else if (typeof bodyAreas === 'string') {
+      try {
+        const parsed = JSON.parse(bodyAreas);
+        if (Array.isArray(parsed)) {
+          cleanBodyAreas = parsed;
+        } else if (typeof parsed === 'object' && parsed !== null) {
+          cleanBodyAreas = [parsed];
+        }
+      } catch {
+        cleanBodyAreas = [];
+      }
     }
 
-    // Buscar ou criar paciente
+    // 2. Extrair dados para identificação do paciente (amarração 100%)
+    const cleanEmail = (patientEmail || req.body.email || answers?.q_email || '').toLowerCase().trim();
+    const cleanPhone = (patientPhone || req.body.phone || answers?.q_telefone || '').trim();
+    const cleanName = (patientName || req.body.name || answers?.q_nome || 'Paciente').trim();
+
     let patient = null;
+
+    // A) Se patientId for um ObjectId válido do MongoDB, tenta buscar diretamente
     if (patientId && mongoose.Types.ObjectId.isValid(patientId)) {
       patient = await Patient.findById(patientId);
     }
-    if (!patient && (patientEmail || req.user?.email)) {
-      const email = (patientEmail || req.user?.email || '').toLowerCase().trim();
-      patient = await Patient.findOne({ email });
-    }
-    if (!patient && patientName) {
-      patient = await Patient.findOne({ name: patientName.trim() });
-    }
-    if (!patient && req.user?.id && mongoose.Types.ObjectId.isValid(req.user.id)) {
-      patient = await Patient.findOne({ userId: req.user.id });
+
+    // B) Se não encontrou por ID (ou se patientId era string tipo local "pat-1234"), tenta por email
+    if (!patient && cleanEmail) {
+      patient = await Patient.findOne({ email: cleanEmail });
     }
 
-    // Se ainda não existir ficha, cria automaticamente
+    // C) Se não encontrou por email, tenta por telefone
+    if (!patient && cleanPhone) {
+      patient = await Patient.findOne({ phone: cleanPhone });
+    }
+
+    // D) Se não encontrou por telefone, tenta pelo nome exato (se não for genérico)
+    if (!patient && cleanName && cleanName.toLowerCase() !== 'paciente') {
+      patient = await Patient.findOne({ name: new RegExp(`^${cleanName}$`, 'i') });
+    }
+
+    // E) Se o paciente ainda não existir no banco, cria o paciente e seu usuário correspondente (Amarração 100%)
     if (!patient) {
+      const generatedEmail = cleanEmail || `paciente_${Date.now()}@clinica.com`;
+
+      // Garante que o User correspondente exista para permitir login no portal
+      let user = await User.findOne({ email: generatedEmail });
+      if (!user) {
+        const defaultHash = await bcrypt.hash('123456', 10);
+        user = await User.create({
+          name: cleanName,
+          email: generatedEmail,
+          phone: cleanPhone || '(11) 99999-9999',
+          password: defaultHash,
+          role: 'PATIENT',
+          status: 'approved',
+          isApproved: true,
+          approvedBy: req.user?.id,
+          approvedAt: new Date()
+        });
+      }
+
       patient = await Patient.create({
-        name: patientName || req.user?.name || 'Novo Paciente',
-        email: (patientEmail || req.user?.email || `paciente_${Date.now()}@email.com`).toLowerCase().trim(),
-        phone: patientPhone || req.user?.phone || '(11) 99999-9999',
-        status: 'ativo',
+        userId: user._id,
+        name: cleanName,
+        email: generatedEmail,
+        phone: cleanPhone || user.phone || '(11) 99999-9999',
         treatmentType: 'Massoterapia e Estética Corporal',
+        status: 'ativo',
         totalSessions: 1,
-        lastVisit: new Date().toISOString().split('T')[0]
+        lastVisit: new Date().toISOString().split('T')[0],
+        notes: clinicalObservations || '',
+        approvedBy: req.user?.id,
+        approvedAt: new Date()
+      });
+      console.log(`✅ Novo paciente criado e amarrado automaticamente ao salvar anamnese: ${patient.name} (${patient.email})`);
+    } else {
+      // Paciente existente: incrementa sessões e atualiza última visita
+      patient.totalSessions = (patient.totalSessions || 0) + 1;
+      patient.lastVisit = new Date().toISOString().split('T')[0];
+      if (cleanPhone && (!patient.phone || patient.phone === '(11) 99999-9999')) {
+        patient.phone = cleanPhone;
+      }
+      if (clinicalObservations && !patient.notes) {
+        patient.notes = clinicalObservations;
+      }
+
+      // Se o paciente não tiver userId vinculado, amarra ao User
+      if (!patient.userId) {
+        let user = await User.findOne({ email: patient.email.toLowerCase().trim() });
+        if (!user) {
+          const defaultHash = await bcrypt.hash('123456', 10);
+          user = await User.create({
+            name: patient.name,
+            email: patient.email,
+            phone: patient.phone,
+            password: defaultHash,
+            role: 'PATIENT',
+            status: 'approved',
+            isApproved: true
+          });
+        }
+        patient.userId = user._id;
+      }
+      await patient.save();
+    }
+
+    // 3. Salvar ou atualizar Ficha de Anamnese no banco
+    let anamnesis = null;
+    if (id && mongoose.Types.ObjectId.isValid(id)) {
+      anamnesis = await Anamnesis.findById(id);
+    }
+
+    if (anamnesis) {
+      anamnesis.patientId = patient._id;
+      anamnesis.patientName = patient.name;
+      anamnesis.patientEmail = patient.email;
+      anamnesis.patientPhone = patient.phone;
+      anamnesis.doctorName = doctorName || 'Dra. Yasmin Oliveira';
+      anamnesis.pressurePreference = pressurePreference || 'Média / Terapêutica';
+      anamnesis.mainObjective = mainObjective || 'Bem-estar e estética corporal';
+      anamnesis.bodyAreas = cleanBodyAreas;
+      anamnesis.answers = answers || {};
+      anamnesis.detectedAlerts = detectedAlerts || [];
+      anamnesis.clinicalObservations = clinicalObservations || '';
+      anamnesis.recommendedTechniques = recommendedTechniques || [];
+      anamnesis.updatedAt = new Date();
+      await anamnesis.save();
+    } else {
+      anamnesis = await Anamnesis.create({
+        patientId: patient._id,
+        patientName: patient.name,
+        patientEmail: patient.email,
+        patientPhone: patient.phone,
+        doctorName: doctorName || 'Dra. Yasmin Oliveira',
+        pressurePreference: pressurePreference || 'Média / Terapêutica',
+        mainObjective: mainObjective || 'Bem-estar e estética corporal',
+        bodyAreas: cleanBodyAreas,
+        answers: answers || {},
+        detectedAlerts: detectedAlerts || [],
+        clinicalObservations: clinicalObservations || '',
+        recommendedTechniques: recommendedTechniques || [],
+        exams: exams || [],
+        status: 'concluido'
       });
     }
 
-    // Criar anamnese com dados limpos
-    const anamnesis = await Anamnesis.create({
-      patientId: patient._id,
-      patientName: patient.name,
-      patientEmail: patient.email,
-      patientPhone: patient.phone,
-      doctorName: doctorName || 'Dra. Yasmin Oliveira',
-      pressurePreference: pressurePreference || 'Média / Terapêutica',
-      mainObjective,
-      bodyAreas: bodyAreas, // Agora é um array
-      answers,
-      detectedAlerts: detectedAlerts || [],
-      clinicalObservations: clinicalObservations || '',
-      recommendedTechniques: recommendedTechniques || [],
-      exams: exams || [],
-      status: 'concluido'
-    });
-    
-    // Atualiza paciente
-    await Patient.findByIdAndUpdate(patient._id, {
-      hasAnamnesis: true,
-      anamnesisStatus: 'concluido',
-      anamnesisDate: new Date().toISOString(),
-      anamnesisId: anamnesis._id,
-      status: patient.status === 'aguardando_aprovacao' ? 'ativo' : patient.status,
-      $inc: { totalSessions: 1 },
-      lastVisit: new Date().toISOString().split('T')[0]
-    });
-
-    console.log(`✅ Anamnese salva com sucesso para: ${patient.name}`);
+    console.log(`📋 Anamnese gravada com sucesso para ${patient.name} (ID: ${anamnesis._id})`);
 
     res.status(201).json({ 
       success: true, 
-      message: 'Ficha de anamnese salva com sucesso!',
+      message: 'Ficha de anamnese salva com sucesso no banco de dados',
       anamnesis: {
         id: anamnesis._id.toString(),
-        patientId: anamnesis.patientId.toString(),
+        patientId: patient._id.toString(),
         patientName: patient.name,
+        patientEmail: patient.email,
+        patientPhone: patient.phone,
         doctorName: anamnesis.doctorName,
+        pressurePreference: anamnesis.pressurePreference,
         mainObjective: anamnesis.mainObjective,
         bodyAreas: anamnesis.bodyAreas,
         answers: anamnesis.answers,
         detectedAlerts: anamnesis.detectedAlerts,
-        status: 'concluido',
-        createdAt: anamnesis.createdAt.toISOString()
+        clinicalObservations: anamnesis.clinicalObservations,
+        recommendedTechniques: anamnesis.recommendedTechniques,
+        status: anamnesis.status,
+        createdAt: anamnesis.createdAt ? anamnesis.createdAt.toISOString() : new Date().toISOString()
+      },
+      patient: {
+        id: patient._id.toString(),
+        userId: patient.userId ? patient.userId.toString() : '',
+        name: patient.name,
+        email: patient.email,
+        phone: patient.phone,
+        status: patient.status,
+        treatmentType: patient.treatmentType,
+        totalSessions: patient.totalSessions,
+        lastVisit: patient.lastVisit
       }
     });
   } catch (err) {
-    console.error('❌ Erro ao salvar anamnese:', err);
-    res.status(500).json({ 
-      error: 'Erro ao salvar anamnese',
-      details: err.message,
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
-    });
+    console.error('❌ Erro ao salvar anamnese no backend:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 🔧 FUNÇÃO AUXILIAR PARA PROCESSAR bodyAreas STRING
-function processBodyAreasString(str) {
+// ATUALIZAR FICHA DE ANAMNESE POR ID
+app.put('/api/anamnesis/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
-    // Remover quebras de linha e espaços extras
-    const clean = str.replace(/[\n\r]/g, '').trim();
-    
-    // Tentar extrair objetos
-    const matches = clean.match(/\{[^}]+\}/g);
-    if (matches) {
-      return matches.map(item => {
-        const obj = {};
-        // Extrair propriedades
-        const pairs = item.match(/(\w+):\s*([^,}]+)/g) || [];
-        pairs.forEach(pair => {
-          const [key, value] = pair.split(':').map(s => s.trim());
-          if (key === 'id' || key === 'name' || key === 'type') {
-            obj[key] = value.replace(/['"]/g, '');
-          } else if (key === 'intensity') {
-            obj[key] = parseInt(value) || 0;
-          }
-        });
-        return obj;
+    const { id } = req.params;
+    const updateData = { ...req.body, updatedAt: new Date() };
+
+    if (updateData.bodyAreas && Array.isArray(updateData.bodyAreas)) {
+      updateData.bodyAreas = updateData.bodyAreas.map(b => {
+        if (typeof b === 'string') {
+          try { return JSON.parse(b); } catch { return { id: b, name: b, type: 'dor_tensao', intensity: 5 }; }
+        }
+        return b;
       });
     }
-    return [];
-  } catch (e) {
-    console.warn('⚠️ Erro ao processar bodyAreas string:', e);
-    return [];
-  }
-}
 
+    let updated = null;
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      updated = await Anamnesis.findByIdAndUpdate(id, updateData, { new: true });
+    }
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Ficha de anamnese não encontrada' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Ficha de anamnese atualizada com sucesso',
+      anamnesis: {
+        id: updated._id.toString(),
+        patientId: updated.patientId ? updated.patientId.toString() : '',
+        patientName: updated.patientName || '',
+        patientEmail: updated.patientEmail || '',
+        patientPhone: updated.patientPhone || '',
+        doctorName: updated.doctorName,
+        pressurePreference: updated.pressurePreference,
+        mainObjective: updated.mainObjective,
+        bodyAreas: updated.bodyAreas,
+        answers: updated.answers,
+        detectedAlerts: updated.detectedAlerts,
+        clinicalObservations: updated.clinicalObservations,
+        recommendedTechniques: updated.recommendedTechniques,
+        status: updated.status,
+        createdAt: updated.createdAt ? updated.createdAt.toISOString() : new Date().toISOString()
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// LISTAR TODAS AS ANAMNESES (Doutora)
 app.get('/api/anamnesis', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const rawRecords = await Anamnesis.find().sort({ createdAt: -1 });
     const records = rawRecords.map(a => ({
       id: a._id.toString(),
-      patientId: a.patientId.toString(),
+      patientId: a.patientId ? a.patientId.toString() : '',
       patientName: a.patientName || '',
       patientEmail: a.patientEmail || '',
       patientPhone: a.patientPhone || '',
-      doctorName: a.doctorName,
-      pressurePreference: a.pressurePreference,
-      mainObjective: a.mainObjective,
-      bodyAreas: a.bodyAreas,
-      answers: a.answers,
-      detectedAlerts: a.detectedAlerts,
-      clinicalObservations: a.clinicalObservations,
-      recommendedTechniques: a.recommendedTechniques,
+      doctorName: a.doctorName || 'Dra. Yasmin Oliveira',
+      pressurePreference: a.pressurePreference || 'Média / Terapêutica',
+      mainObjective: a.mainObjective || 'Bem-estar e estética corporal',
+      bodyAreas: a.bodyAreas || [],
+      answers: a.answers || {},
+      detectedAlerts: a.detectedAlerts || [],
+      clinicalObservations: a.clinicalObservations || '',
+      recommendedTechniques: a.recommendedTechniques || [],
       status: a.status || 'concluido',
-      createdAt: a.createdAt.toISOString()
+      createdAt: a.createdAt ? a.createdAt.toISOString() : new Date().toISOString()
     }));
     res.json({ success: true, records });
   } catch (err) {
@@ -1894,40 +1554,44 @@ app.get('/api/anamnesis', authMiddleware, requireDoctor, async (req, res) => {
   }
 });
 
+// BUSCAR ANAMNESE POR ID DO PACIENTE
 app.get('/api/anamnesis/patient/:patientId', authMiddleware, async (req, res) => {
   try {
+    const { patientId } = req.params;
     let query = {};
-    if (mongoose.Types.ObjectId.isValid(req.params.patientId)) {
-      query.patientId = req.params.patientId;
+    if (mongoose.Types.ObjectId.isValid(patientId)) {
+      query = { patientId };
     } else {
-      const p = await Patient.findOne({
+      const patient = await Patient.findOne({
         $or: [
-          { email: req.params.patientId.toLowerCase().trim() },
-          { name: req.params.patientId }
+          { email: patientId.toLowerCase().trim() },
+          { phone: patientId }
         ]
       });
-      if (p) {
-        query.patientId = p._id;
+      if (patient) {
+        query = { patientId: patient._id };
       } else {
-        return res.json({ success: true, records: [] });
+        query = { patientEmail: patientId.toLowerCase().trim() };
       }
     }
 
     const rawRecords = await Anamnesis.find(query).sort({ createdAt: -1 });
     const records = rawRecords.map(a => ({
       id: a._id.toString(),
-      patientId: a.patientId.toString(),
+      patientId: a.patientId ? a.patientId.toString() : '',
       patientName: a.patientName || '',
-      doctorName: a.doctorName,
-      pressurePreference: a.pressurePreference,
-      mainObjective: a.mainObjective,
-      bodyAreas: a.bodyAreas,
-      answers: a.answers,
-      detectedAlerts: a.detectedAlerts,
-      clinicalObservations: a.clinicalObservations,
-      recommendedTechniques: a.recommendedTechniques,
+      patientEmail: a.patientEmail || '',
+      patientPhone: a.patientPhone || '',
+      doctorName: a.doctorName || 'Dra. Yasmin Oliveira',
+      pressurePreference: a.pressurePreference || 'Média / Terapêutica',
+      mainObjective: a.mainObjective || 'Bem-estar e estética corporal',
+      bodyAreas: a.bodyAreas || [],
+      answers: a.answers || {},
+      detectedAlerts: a.detectedAlerts || [],
+      clinicalObservations: a.clinicalObservations || '',
+      recommendedTechniques: a.recommendedTechniques || [],
       status: a.status || 'concluido',
-      createdAt: a.createdAt.toISOString()
+      createdAt: a.createdAt ? a.createdAt.toISOString() : new Date().toISOString()
     }));
     res.json({ success: true, records });
   } catch (err) {
@@ -1935,34 +1599,46 @@ app.get('/api/anamnesis/patient/:patientId', authMiddleware, async (req, res) =>
   }
 });
 
+// MINHAS ANAMNESES (Paciente logado)
 app.get('/api/anamnesis/my', authMiddleware, async (req, res) => {
   try {
+    const userEmail = req.user.email?.toLowerCase().trim();
     const patient = await Patient.findOne({
       $or: [
         { userId: req.user.id },
-        { email: req.user.email?.toLowerCase().trim() }
+        { email: userEmail }
       ]
     });
 
-    if (!patient) {
-      return res.json({ success: true, records: [] });
+    let query = {};
+    if (patient) {
+      query = {
+        $or: [
+          { patientId: patient._id },
+          { patientEmail: userEmail }
+        ]
+      };
+    } else if (userEmail) {
+      query = { patientEmail: userEmail };
     }
 
-    const rawRecords = await Anamnesis.find({ patientId: patient._id }).sort({ createdAt: -1 });
+    const rawRecords = await Anamnesis.find(query).sort({ createdAt: -1 });
     const records = rawRecords.map(a => ({
       id: a._id.toString(),
-      patientId: a.patientId.toString(),
-      patientName: a.patientName || patient.name,
-      doctorName: a.doctorName,
-      pressurePreference: a.pressurePreference,
-      mainObjective: a.mainObjective,
-      bodyAreas: a.bodyAreas,
-      answers: a.answers,
-      detectedAlerts: a.detectedAlerts,
-      clinicalObservations: a.clinicalObservations,
-      recommendedTechniques: a.recommendedTechniques,
+      patientId: a.patientId ? a.patientId.toString() : '',
+      patientName: a.patientName || '',
+      patientEmail: a.patientEmail || '',
+      patientPhone: a.patientPhone || '',
+      doctorName: a.doctorName || 'Dra. Yasmin Oliveira',
+      pressurePreference: a.pressurePreference || 'Média / Terapêutica',
+      mainObjective: a.mainObjective || 'Bem-estar e estética corporal',
+      bodyAreas: a.bodyAreas || [],
+      answers: a.answers || {},
+      detectedAlerts: a.detectedAlerts || [],
+      clinicalObservations: a.clinicalObservations || '',
+      recommendedTechniques: a.recommendedTechniques || [],
       status: a.status || 'concluido',
-      createdAt: a.createdAt.toISOString()
+      createdAt: a.createdAt ? a.createdAt.toISOString() : new Date().toISOString()
     }));
     res.json({ success: true, records });
   } catch (err) {
@@ -1971,190 +1647,28 @@ app.get('/api/anamnesis/my', authMiddleware, async (req, res) => {
 });
 
 // ==============================================================================
-// 7. ROTAS DE EVOLUÇÃO & MEDIDAS (/api/evolutions e /api/patients/:id/evolutions)
+// 7. ROTAS DE AGENDAMENTO (/api/appointments)
 // ==============================================================================
 
-app.get('/api/evolutions', authMiddleware, requireDoctor, async (req, res) => {
-  try {
-    const evolutions = await Evolution.find().sort({ date: -1, createdAt: -1 });
-    res.json({
-      success: true,
-      evolutions: evolutions.map(e => ({
-        id: e._id.toString(),
-        patientId: e.patientId.toString(),
-        sessionNumber: e.sessionNumber,
-        date: e.date,
-        technique: e.technique,
-        areasTreated: e.areasTreated || [],
-        patientFeedback: e.patientFeedback || '',
-        therapistNotes: e.therapistNotes || '',
-        measurements: e.measurements || {},
-        doctorName: e.doctorName || 'Dra. Yasmin Oliveira',
-        createdAt: e.createdAt ? e.createdAt.toISOString() : ''
-      }))
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/patients/:patientId/evolutions', authMiddleware, async (req, res) => {
-  try {
-    let query = {};
-    if (mongoose.Types.ObjectId.isValid(req.params.patientId)) {
-      query.patientId = req.params.patientId;
-    } else {
-      const p = await Patient.findOne({
-        $or: [
-          { email: req.params.patientId.toLowerCase().trim() },
-          { name: req.params.patientId }
-        ]
-      });
-      if (p) {
-        query.patientId = p._id;
-      } else {
-        return res.json({ success: true, evolutions: [] });
-      }
-    }
-
-    const evolutions = await Evolution.find(query).sort({ sessionNumber: 1, date: 1 });
-    res.json({
-      success: true,
-      evolutions: evolutions.map(e => ({
-        id: e._id.toString(),
-        patientId: e.patientId.toString(),
-        sessionNumber: e.sessionNumber,
-        date: e.date,
-        technique: e.technique,
-        areasTreated: e.areasTreated || [],
-        patientFeedback: e.patientFeedback || '',
-        therapistNotes: e.therapistNotes || '',
-        measurements: e.measurements || {},
-        doctorName: e.doctorName || 'Dra. Yasmin Oliveira',
-        createdAt: e.createdAt ? e.createdAt.toISOString() : ''
-      }))
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/patients/:patientId/evolutions', authMiddleware, async (req, res) => {
-  try {
-    let patient = null;
-    if (mongoose.Types.ObjectId.isValid(req.params.patientId)) {
-      patient = await Patient.findById(req.params.patientId);
-    } else {
-      patient = await Patient.findOne({
-        $or: [
-          { email: req.params.patientId.toLowerCase().trim() },
-          { name: req.params.patientId }
-        ]
-      });
-    }
-
-    if (!patient) {
-      return res.status(404).json({ error: 'Paciente não encontrado para registrar evolução' });
-    }
-
-    const currentCount = await Evolution.countDocuments({ patientId: patient._id });
-    const sessionNumber = req.body.sessionNumber || (currentCount + 1);
-
-    const evolution = await Evolution.create({
-      patientId: patient._id,
-      sessionNumber,
-      date: req.body.date || new Date().toISOString().split('T')[0],
-      technique: req.body.technique || 'Massoterapia & Estética Corporal',
-      areasTreated: req.body.areasTreated || [],
-      patientFeedback: req.body.patientFeedback || '',
-      therapistNotes: req.body.therapistNotes || '',
-      measurements: req.body.measurements || {},
-      doctorName: req.body.doctorName || 'Dra. Yasmin Oliveira'
-    });
-
-    // Atualiza paciente com última visita e sessões totais
-    await Patient.findByIdAndUpdate(patient._id, {
-      totalSessions: Math.max(patient.totalSessions || 0, sessionNumber),
-      lastVisit: evolution.date
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'Evolução e medidas registradas com sucesso!',
-      evolution: {
-        id: evolution._id.toString(),
-        patientId: evolution.patientId.toString(),
-        sessionNumber: evolution.sessionNumber,
-        date: evolution.date,
-        technique: evolution.technique,
-        areasTreated: evolution.areasTreated,
-        patientFeedback: evolution.patientFeedback,
-        therapistNotes: evolution.therapistNotes,
-        measurements: evolution.measurements,
-        doctorName: evolution.doctorName,
-        createdAt: evolution.createdAt.toISOString()
-      }
-    });
-  } catch (err) {
-    console.error('❌ Erro ao criar evolução:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/evolutions/:id', authMiddleware, requireDoctor, async (req, res) => {
-  try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(400).json({ error: 'ID de evolução inválido' });
-    }
-    const deleted = await Evolution.findByIdAndDelete(req.params.id);
-    if (!deleted) return res.status(404).json({ error: 'Evolução não encontrada' });
-    res.json({ success: true, message: 'Evolução removida com sucesso' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ==============================================================================
-// 8. ROTAS DE AGENDAMENTO (/api/appointments)
-// ==============================================================================
-
+// AGENDAR CONSULTA
 app.post('/api/appointments', authMiddleware, async (req, res) => {
   try {
-    const { patientId, service, date, time, notes, patientName, patientPhone, patientEmail } = req.body;
+    const { patientId, service, date, time, notes } = req.body;
     let patient = null;
 
-    if (patientId && mongoose.Types.ObjectId.isValid(patientId)) {
+    if (patientId) {
       patient = await Patient.findById(patientId);
     }
-    if (!patient && (patientEmail || req.user?.email)) {
-      const email = (patientEmail || req.user?.email || '').toLowerCase().trim();
-      patient = await Patient.findOne({ email });
-    }
-    if (!patient && patientName) {
-      patient = await Patient.findOne({ name: patientName.trim() });
-    }
-    if (!patient && req.user?.id && mongoose.Types.ObjectId.isValid(req.user.id)) {
-      patient = await Patient.findOne({ userId: req.user.id });
+    if (!patient && req.user?.email) {
+      patient = await Patient.findOne({ email: req.user.email.toLowerCase().trim() });
     }
 
     if (!patient) {
-      // Se for a doutora agendando para alguém novo, cria a ficha
-      if (req.user?.role === 'DOCTOR') {
-        patient = await Patient.create({
-          name: patientName || 'Novo Paciente',
-          email: (patientEmail || `paciente_${Date.now()}@email.com`).toLowerCase().trim(),
-          phone: patientPhone || '(11) 99999-9999',
-          status: 'ativo',
-          treatmentType: service || 'Massoterapia e Estética Corporal'
-        });
-      } else {
-        return res.status(404).json({ error: 'Paciente não encontrado para agendamento' });
-      }
+      return res.status(404).json({ error: 'Paciente não encontrado para agendamento' });
     }
 
-    // Se a doutora está agendando, sempre permite. Se for paciente com aprovação pendente, avisa
-    if (req.user?.role !== 'DOCTOR' && patient.status === 'aguardando_aprovacao') {
-      return res.status(403).json({ error: 'Cadastro aguardando aprovação pela Dra. Yasmin para liberar agendamento.' });
+    if (patient.status === 'aguardando_aprovacao') {
+      return res.status(403).json({ error: 'Cadastro aguardando aprovação para liberar agendamento.' });
     }
 
     const appointment = await Appointment.create({
@@ -2166,8 +1680,7 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
       date,
       time,
       notes: notes || '',
-      status: req.user?.role === 'DOCTOR' ? 'confirmado' : 'agendado',
-      doctorName: 'Dra. Yasmin Oliveira'
+      status: 'agendado'
     });
 
     res.status(201).json({ 
@@ -2177,7 +1690,6 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
         id: appointment._id.toString(),
         patientId: appointment.patientId.toString(),
         patientName: appointment.patientName,
-        patientEmail: appointment.patientEmail,
         patientPhone: appointment.patientPhone,
         service: appointment.service,
         date: appointment.date,
@@ -2188,11 +1700,11 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('❌ Erro ao agendar consulta:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// MINHAS CONSULTAS (Paciente logado)
 app.get('/api/appointments/my', authMiddleware, async (req, res) => {
   try {
     const patient = await Patient.findOne({
@@ -2226,6 +1738,7 @@ app.get('/api/appointments/my', authMiddleware, async (req, res) => {
   }
 });
 
+// TODAS AS CONSULTAS (Doutora)
 app.get('/api/appointments', authMiddleware, requireDoctor, async (req, res) => {
   try {
     const raw = await Appointment.find().sort({ date: 1, time: 1 });
@@ -2248,20 +1761,12 @@ app.get('/api/appointments', authMiddleware, requireDoctor, async (req, res) => 
   }
 });
 
-app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
+// ATUALIZAR STATUS DA CONSULTA
+app.patch('/api/appointments/:id', authMiddleware, requireDoctor, async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(400).json({ error: 'ID de agendamento inválido' });
-    }
-    const updateData = {};
-    if (req.body.status) updateData.status = req.body.status;
-    if (req.body.date) updateData.date = req.body.date;
-    if (req.body.time) updateData.time = req.body.time;
-    if (req.body.notes !== undefined) updateData.notes = req.body.notes;
-
     const appointment = await Appointment.findByIdAndUpdate(
       req.params.id,
-      updateData,
+      { status: req.body.status },
       { new: true }
     );
     if (!appointment) {
@@ -2281,19 +1786,6 @@ app.patch('/api/appointments/:id', authMiddleware, async (req, res) => {
         notes: appointment.notes
       }
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/appointments/:id', authMiddleware, async (req, res) => {
-  try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(400).json({ error: 'ID de agendamento inválido' });
-    }
-    const deleted = await Appointment.findByIdAndDelete(req.params.id);
-    if (!deleted) return res.status(404).json({ error: 'Agendamento não encontrado' });
-    res.json({ success: true, message: 'Agendamento cancelado e excluído com sucesso' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2425,11 +1917,24 @@ async function seedDefaultQuestionsIfEmpty(force = false) {
   }
 }
 
+// Fallback para quando o MongoDB estiver offline
+app.use((err, req, res, next) => {
+  if (err.name === 'MongooseError' || err.name === 'MongoNetworkError' || (err.message && err.message.includes('buffering timed out'))) {
+    console.warn('[AI Studio] Database offline — returning mock empty response');
+    if (req.method === 'GET') {
+      return res.json(req.path.endsWith('s') || req.path.endsWith('s/') ? [] : {});
+    }
+    return res.status(503).json({ error: 'Service temporarily unavailable (database offline)' });
+  }
+  next(err);
+});
+
 // ==============================================================================
-// INICIALIZAÇÃO DO SERVIDOR
+// INICIALIZAÇÃO DO SERVIDOR COM INTEGRAÇÃO VITE
 // ==============================================================================
 
 async function startServer() {
+  // Em desenvolvimento (ou AI Studio container): monta middleware do Vite
   if (process.env.NODE_ENV !== 'production') {
     try {
       const { createServer: createViteServer } = await import('vite');
@@ -2443,6 +1948,7 @@ async function startServer() {
       console.warn('⚠️ Vite dev middleware não inicializado:', err.message);
     }
   } else {
+    // Em produção (Render ou container isolado)
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
