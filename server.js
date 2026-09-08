@@ -213,8 +213,8 @@ const AppointmentSchema = new mongoose.Schema({
   time: { type: String, required: true },
   status: { 
     type: String, 
-    enum: ['agendado', 'confirmado', 'realizado', 'cancelado'], 
-    default: 'agendado' 
+    enum: ['pendente', 'agendado', 'confirmado', 'realizado', 'cancelado'], 
+    default: 'pendente' 
   },
   notes: { type: String, default: '' },
   doctorName: { type: String, default: 'Dra. Yasmin Oliveira' },
@@ -298,16 +298,28 @@ app.post('/api/auth/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const assignedRole = role === 'DOCTOR' ? 'DOCTOR' : 'PATIENT';
 
-    // AMARRAÇÃO AUTOMÁTICA POR E-MAIL:
-    // Verifica se a Dra. Yasmin já havia cadastrado o paciente com este e-mail
-    const existingPatient = await Patient.findOne({ email: cleanEmail });
+    // AMARRAÇÃO AUTOMÁTICA POR E-MAIL E/OU TELEFONE:
+    // Se o email e/ou telefone der match, vai direto pois trata-se de um paciente que a Dra. Yasmin já havia cadastrado
+    const cleanPhone = (phone || '').trim();
+    const phoneDigits = cleanPhone.replace(/\D/g, '');
 
-    const isAutoApproved = assignedRole === 'DOCTOR' || !!existingPatient;
+    let existingPatient = await Patient.findOne({ email: cleanEmail });
+
+    if (!existingPatient && phoneDigits.length >= 8) {
+      const allPatients = await Patient.find();
+      existingPatient = allPatients.find(p => {
+        const pDigits = (p.phone || '').replace(/\D/g, '');
+        return pDigits.length >= 8 && (pDigits === phoneDigits || pDigits.endsWith(phoneDigits) || phoneDigits.endsWith(pDigits));
+      });
+    }
+
+    const isMatch = !!existingPatient;
+    const isAutoApproved = assignedRole === 'DOCTOR' || isMatch;
 
     const newUser = await User.create({
       name: name.trim(),
       email: cleanEmail,
-      phone: phone.trim(),
+      phone: cleanPhone,
       password: hashedPassword,
       role: assignedRole,
       status: isAutoApproved ? 'approved' : 'pending',
@@ -321,11 +333,13 @@ app.post('/api/auth/register', async (req, res) => {
         // Vincula a ficha existente da Dra. ao novo usuário
         existingPatient.userId = newUser._id;
         existingPatient.status = 'ativo';
+        if (!existingPatient.email) existingPatient.email = cleanEmail;
+        if (!existingPatient.phone) existingPatient.phone = cleanPhone;
         await existingPatient.save();
         patientRecord = existingPatient;
-        console.log(`🔗 Paciente existente vinculado ao novo usuário: ${cleanEmail}`);
+        console.log(`🔗 MATCH CONFIRMADO! Paciente existente vinculado ao novo usuário: ${cleanEmail}`);
       } else {
-        // Cria paciente aguardando aprovação
+        // Cria paciente aguardando aprovação da Dra. Yasmin
         patientRecord = await Patient.create({
           userId: newUser._id,
           name: newUser.name,
@@ -334,7 +348,7 @@ app.post('/api/auth/register', async (req, res) => {
           status: 'aguardando_aprovacao',
           treatmentType: 'Massoterapia e Estética Corporal'
         });
-        console.log(`✅ Novo paciente criado aguardando aprovação: ${cleanEmail}`);
+        console.log(`⏳ NOVO USUÁRIO PENDENTE: aguardando aprovação da Dra. Yasmin: ${cleanEmail}`);
       }
     }
 
@@ -346,9 +360,10 @@ app.post('/api/auth/register', async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: existingPatient 
-        ? 'Cadastro realizado! Sua ficha clínica foi vinculada com sucesso.'
-        : 'Cadastro realizado com sucesso!',
+      isMatch,
+      message: isMatch 
+        ? 'Pré-cadastro identificado! Seu acesso foi liberado com sucesso.'
+        : 'Cadastro realizado com sucesso! Sua solicitação está aguardando aprovação da Dra. Yasmin.',
       token,
       user: {
         id: newUser._id.toString(),
@@ -360,7 +375,7 @@ app.post('/api/auth/register', async (req, res) => {
         isApproved: newUser.isApproved
       },
       patient: patientRecord,
-      isExistingPatient: !!existingPatient
+      isExistingPatient: isMatch
     });
   } catch (err) {
     console.error('Erro no registro:', err);
@@ -730,6 +745,16 @@ app.get('/api/patients/:id', authMiddleware, async (req, res) => {
     const patient = await Patient.findById(req.params.id);
     if (!patient) return res.status(404).json({ error: 'Paciente não encontrado' });
 
+    // ISOLAMENTO DE DADOS: Apenas a doutora tem acesso total a tudo.
+    // Pacientes só podem visualizar seus próprios dados.
+    if (req.user.role !== 'DOCTOR') {
+      const isSelf = (patient.userId && patient.userId.toString() === req.user.id) ||
+                     (patient.email && patient.email.toLowerCase() === req.user.email?.toLowerCase());
+      if (!isSelf) {
+        return res.status(403).json({ error: 'Acesso negado: Você só pode visualizar seus próprios dados.' });
+      }
+    }
+
     const anamneses = await Anamnesis.find({ patientId: patient._id }).sort({ createdAt: -1 });
 
     res.json({
@@ -1057,6 +1082,15 @@ app.post('/api/patients/:id/exams', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'Paciente não encontrado' });
     }
 
+    // ISOLAMENTO DE DADOS: Apenas a doutora tem acesso total. Paciente só acessa a si mesmo.
+    if (req.user.role !== 'DOCTOR') {
+      const isSelf = (patient.userId && patient.userId.toString() === req.user.id) ||
+                     (patient.email && patient.email.toLowerCase() === req.user.email?.toLowerCase());
+      if (!isSelf) {
+        return res.status(403).json({ error: 'Acesso negado: Você só pode anexar exames na sua própria ficha.' });
+      }
+    }
+
     const newExam = {
       title: title.trim(),
       category: category || 'Laudo Médico',
@@ -1095,6 +1129,16 @@ app.get('/api/patients/:id/exams', authMiddleware, async (req, res) => {
   try {
     const patient = await Patient.findById(req.params.id);
     if (!patient) return res.status(404).json({ error: 'Paciente não encontrado' });
+
+    // ISOLAMENTO DE DADOS
+    if (req.user.role !== 'DOCTOR') {
+      const isSelf = (patient.userId && patient.userId.toString() === req.user.id) ||
+                     (patient.email && patient.email.toLowerCase() === req.user.email?.toLowerCase());
+      if (!isSelf) {
+        return res.status(403).json({ error: 'Acesso negado: Você só pode ver seus próprios exames.' });
+      }
+    }
+
     res.json({ success: true, exams: patient.exams || [] });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1107,6 +1151,15 @@ app.delete('/api/patients/:id/exams/:examId', authMiddleware, async (req, res) =
     const { id, examId } = req.params;
     const patient = await Patient.findById(id);
     if (!patient) return res.status(404).json({ error: 'Paciente não encontrado' });
+
+    // ISOLAMENTO DE DADOS
+    if (req.user.role !== 'DOCTOR') {
+      const isSelf = (patient.userId && patient.userId.toString() === req.user.id) ||
+                     (patient.email && patient.email.toLowerCase() === req.user.email?.toLowerCase());
+      if (!isSelf) {
+        return res.status(403).json({ error: 'Acesso negado: Você só pode remover seus próprios exames.' });
+      }
+    }
 
     patient.exams = patient.exams.filter(ex => ex._id.toString() !== examId);
     await patient.save();
@@ -1680,7 +1733,7 @@ app.post('/api/appointments', authMiddleware, async (req, res) => {
       date,
       time,
       notes: notes || '',
-      status: 'agendado'
+      status: req.user.role === 'DOCTOR' ? 'confirmado' : 'pendente'
     });
 
     res.status(201).json({ 
