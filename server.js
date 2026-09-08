@@ -1709,16 +1709,49 @@ app.post('/api/questions/seed', authMiddleware, requireDoctor, async (req, res) 
 
 app.post('/api/anamnesis', authMiddleware, async (req, res) => {
   try {
-    const { 
+    let { 
       patientId, doctorName, pressurePreference, mainObjective, 
-      bodyAreas, answers, detectedAlerts, clinicalObservations, recommendedTechniques, exams,
-      patientName, patientEmail, patientPhone
+      bodyAreas, answers, detectedAlerts, clinicalObservations, 
+      recommendedTechniques, exams, patientName, patientEmail, patientPhone 
     } = req.body;
 
-    if (!mainObjective || !answers) {
-      return res.status(400).json({ error: 'Campos essenciais da anamnese não fornecidos' });
+    // 🔥 CORREÇÃO: Converter bodyAreas se for string
+    if (typeof bodyAreas === 'string') {
+      console.log('⚠️ bodyAreas recebido como string, convertendo...');
+      try {
+        // Tentar parsear como JSON
+        bodyAreas = JSON.parse(bodyAreas);
+      } catch (e) {
+        // Se falhar, processar manualmente
+        bodyAreas = processBodyAreasString(bodyAreas);
+      }
+      console.log('✅ bodyAreas convertido para array:', bodyAreas);
     }
 
+    // 🔥 CORREÇÃO: Garantir que é um array
+    if (!Array.isArray(bodyAreas)) {
+      bodyAreas = [];
+    }
+
+    // 🔥 CORREÇÃO: Converter answers se for string
+    if (typeof answers === 'string') {
+      try {
+        answers = JSON.parse(answers);
+      } catch (e) {
+        console.warn('⚠️ Não foi possível parsear answers:', e);
+        answers = {};
+      }
+    }
+
+    // Validar campos obrigatórios
+    if (!mainObjective || !answers) {
+      return res.status(400).json({ 
+        error: 'Campos essenciais da anamnese não fornecidos',
+        details: 'mainObjective e answers são obrigatórios'
+      });
+    }
+
+    // Buscar ou criar paciente
     let patient = null;
     if (patientId && mongoose.Types.ObjectId.isValid(patientId)) {
       patient = await Patient.findById(patientId);
@@ -1734,7 +1767,7 @@ app.post('/api/anamnesis', authMiddleware, async (req, res) => {
       patient = await Patient.findOne({ userId: req.user.id });
     }
 
-    // Se ainda não existir ficha cadastral, cria automaticamente vinculada para nunca falhar
+    // Se ainda não existir ficha, cria automaticamente
     if (!patient) {
       patient = await Patient.create({
         name: patientName || req.user?.name || 'Novo Paciente',
@@ -1747,6 +1780,7 @@ app.post('/api/anamnesis', authMiddleware, async (req, res) => {
       });
     }
 
+    // Criar anamnese com dados limpos
     const anamnesis = await Anamnesis.create({
       patientId: patient._id,
       patientName: patient.name,
@@ -1755,7 +1789,7 @@ app.post('/api/anamnesis', authMiddleware, async (req, res) => {
       doctorName: doctorName || 'Dra. Yasmin Oliveira',
       pressurePreference: pressurePreference || 'Média / Terapêutica',
       mainObjective,
-      bodyAreas: bodyAreas || [],
+      bodyAreas: bodyAreas, // Agora é um array
       answers,
       detectedAlerts: detectedAlerts || [],
       clinicalObservations: clinicalObservations || '',
@@ -1764,8 +1798,8 @@ app.post('/api/anamnesis', authMiddleware, async (req, res) => {
       status: 'concluido'
     });
     
-    // Atualiza paciente para constar anamnese como concluída e amarrada
-    const updatedPatient = await Patient.findByIdAndUpdate(patient._id, {
+    // Atualiza paciente
+    await Patient.findByIdAndUpdate(patient._id, {
       hasAnamnesis: true,
       anamnesisStatus: 'concluido',
       anamnesisDate: new Date().toISOString(),
@@ -1773,41 +1807,66 @@ app.post('/api/anamnesis', authMiddleware, async (req, res) => {
       status: patient.status === 'aguardando_aprovacao' ? 'ativo' : patient.status,
       $inc: { totalSessions: 1 },
       lastVisit: new Date().toISOString().split('T')[0]
-    }, { new: true });
+    });
+
+    console.log(`✅ Anamnese salva com sucesso para: ${patient.name}`);
 
     res.status(201).json({ 
       success: true, 
-      message: 'Ficha de anamnese salva com sucesso no banco de dados e vinculada ao paciente como concluída!',
+      message: 'Ficha de anamnese salva com sucesso!',
       anamnesis: {
         id: anamnesis._id.toString(),
         patientId: anamnesis.patientId.toString(),
         patientName: patient.name,
-        patientEmail: patient.email,
-        patientPhone: patient.phone,
         doctorName: anamnesis.doctorName,
-        pressurePreference: anamnesis.pressurePreference,
         mainObjective: anamnesis.mainObjective,
         bodyAreas: anamnesis.bodyAreas,
         answers: anamnesis.answers,
         detectedAlerts: anamnesis.detectedAlerts,
-        clinicalObservations: anamnesis.clinicalObservations,
-        recommendedTechniques: anamnesis.recommendedTechniques,
         status: 'concluido',
         createdAt: anamnesis.createdAt.toISOString()
-      },
-      patient: {
-        id: updatedPatient._id.toString(),
-        name: updatedPatient.name,
-        hasAnamnesis: true,
-        anamnesisStatus: 'concluido',
-        anamnesisDate: updatedPatient.anamnesisDate
       }
     });
   } catch (err) {
     console.error('❌ Erro ao salvar anamnese:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ 
+      error: 'Erro ao salvar anamnese',
+      details: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
   }
 });
+
+// 🔧 FUNÇÃO AUXILIAR PARA PROCESSAR bodyAreas STRING
+function processBodyAreasString(str) {
+  try {
+    // Remover quebras de linha e espaços extras
+    const clean = str.replace(/[\n\r]/g, '').trim();
+    
+    // Tentar extrair objetos
+    const matches = clean.match(/\{[^}]+\}/g);
+    if (matches) {
+      return matches.map(item => {
+        const obj = {};
+        // Extrair propriedades
+        const pairs = item.match(/(\w+):\s*([^,}]+)/g) || [];
+        pairs.forEach(pair => {
+          const [key, value] = pair.split(':').map(s => s.trim());
+          if (key === 'id' || key === 'name' || key === 'type') {
+            obj[key] = value.replace(/['"]/g, '');
+          } else if (key === 'intensity') {
+            obj[key] = parseInt(value) || 0;
+          }
+        });
+        return obj;
+      });
+    }
+    return [];
+  } catch (e) {
+    console.warn('⚠️ Erro ao processar bodyAreas string:', e);
+    return [];
+  }
+}
 
 app.get('/api/anamnesis', authMiddleware, requireDoctor, async (req, res) => {
   try {
